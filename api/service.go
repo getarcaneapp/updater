@@ -39,6 +39,11 @@ type restartPlan struct {
 
 // NewService constructs an updater service.
 func NewService(config Config) *Service {
+	applyConfigDefaultsInternal(&config)
+	return newServiceInternal(config)
+}
+
+func newServiceInternal(config Config) *Service {
 	if config.LabelPolicy.IsUpdateDisabledFunc == nil {
 		config.LabelPolicy = labels.DefaultLabelPolicy()
 	}
@@ -51,5 +56,26 @@ func NewService(config Config) *Service {
 		logger:             logger,
 		updatingContainers: map[string]bool{},
 		updatingProjects:   map[string]bool{},
+	}
+}
+
+func applyConfigDefaultsInternal(config *Config) {
+	if config == nil {
+		return
+	}
+	if config.DockerClientProvider == nil {
+		config.DockerClientProvider = NewDockerClientProvider()
+	}
+	if config.ImagePuller == nil {
+		config.ImagePuller = NewImagePuller(config.DockerClientProvider)
+	}
+	if config.PendingStore == nil {
+		config.PendingStore = NewMemoryPendingStore()
+	}
+	if config.RegistryDigestResolver == nil {
+		config.RegistryDigestResolver = NewRegistryDigestResolver()
+	}
+	if config.ProjectUpdater == nil {
+		config.ProjectUpdater = NewDockerComposeProjectUpdater(config.DockerClientProvider)
 	}
 }

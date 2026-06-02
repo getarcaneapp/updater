@@ -8,14 +8,23 @@ import (
 
 func TestComposeLabelsInternal(t *testing.T) {
 	labels := map[string]string{
-		ComposeProjectLabelKey: " app ",
-		ComposeServiceLabelKey: "web",
+		ComposeProjectLabelKey:     " app ",
+		ComposeServiceLabelKey:     "web",
+		ComposeWorkingDirLabelKey:  " /srv/app ",
+		ComposeConfigFilesLabelKey: " compose.yaml, compose.override.yaml ,, ",
 	}
 	if got := ComposeProjectLabel(labels); got != "app" {
 		t.Fatalf("ComposeProjectLabel() = %q, want app", got)
 	}
 	if got := ComposeServiceLabel(labels); got != "web" {
 		t.Fatalf("ComposeServiceLabel() = %q, want web", got)
+	}
+	if got := ComposeWorkingDirLabel(labels); got != "/srv/app" {
+		t.Fatalf("ComposeWorkingDirLabel() = %q, want /srv/app", got)
+	}
+	files := ComposeConfigFilesLabel(labels)
+	if len(files) != 2 || files[0] != "compose.yaml" || files[1] != "compose.override.yaml" {
+		t.Fatalf("ComposeConfigFilesLabel() = %#v, want two config files", files)
 	}
 }
 
