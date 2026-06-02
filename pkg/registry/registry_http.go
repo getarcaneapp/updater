@@ -74,7 +74,7 @@ func FetchRegistryRateLimit(ctx context.Context, registryHost, repository, tag s
 	requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	resp, err := manifestRequestInternal(requestCtx, httpClient, registryHost, repository, tag, basicAuthHeaderForCredentialInternal(credential))
+	resp, err := manifestRequestInternal(requestCtx, httpClient, http.MethodHead, registryHost, repository, tag, basicAuthHeaderForCredentialInternal(credential))
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +102,7 @@ func FetchDigest(ctx context.Context, registryHost, repository, tag string, cred
 	requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	resp, err := manifestRequestInternal(requestCtx, httpClient, registryHost, repository, tag, basicAuthHeaderForCredentialInternal(credential))
+	resp, err := manifestRequestInternal(requestCtx, httpClient, http.MethodGet, registryHost, repository, tag, basicAuthHeaderForCredentialInternal(credential))
 	if err != nil {
 		return "", err
 	}
@@ -140,7 +140,7 @@ func fetchRateLimitWithTokenAuthInternal(ctx context.Context, httpClient *http.C
 		return nil, err
 	}
 
-	resp, err := manifestRequestInternal(ctx, httpClient, registryHost, repository, tag, token)
+	resp, err := manifestRequestInternal(ctx, httpClient, http.MethodHead, registryHost, repository, tag, token)
 	if err != nil {
 		return nil, err
 	}
@@ -165,7 +165,7 @@ func fetchWithTokenAuthInternal(ctx context.Context, httpClient *http.Client, re
 		return "", err
 	}
 
-	resp, err := manifestRequestInternal(ctx, httpClient, registryHost, repository, tag, token)
+	resp, err := manifestRequestInternal(ctx, httpClient, http.MethodGet, registryHost, repository, tag, token)
 	if err != nil {
 		return "", err
 	}
@@ -180,7 +180,7 @@ func fetchWithTokenAuthInternal(ctx context.Context, httpClient *http.Client, re
 	return digest, nil
 }
 
-func manifestRequestInternal(ctx context.Context, httpClient *http.Client, registryHost, repository, tag, authHeader string) (*http.Response, error) {
+func manifestRequestInternal(ctx context.Context, httpClient *http.Client, method, registryHost, repository, tag, authHeader string) (*http.Response, error) {
 	registryHost = utils.NormalizeRegistryForComparison(registryHost)
 	if registryHost == "docker.io" {
 		registryHost = defaultRegistryHost
@@ -191,7 +191,7 @@ func manifestRequestInternal(ctx context.Context, httpClient *http.Client, regis
 		Host:   registryHost,
 		Path:   "/v2/" + strings.Trim(repository, "/") + "/manifests/" + strings.TrimSpace(tag),
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, manifestURL.String(), nil)
+	req, err := http.NewRequestWithContext(ctx, method, manifestURL.String(), nil)
 	if err != nil {
 		return nil, err
 	}
