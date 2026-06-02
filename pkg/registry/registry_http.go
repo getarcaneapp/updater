@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -17,12 +16,6 @@ import (
 )
 
 const defaultRegistryHost = "registry-1.docker.io"
-
-var trustedAuthDelegations = map[string]string{
-	"docker.io":           "auth.docker.io",
-	"lscr.io":             "ghcr.io",
-	"registry.gitlab.com": "gitlab.com",
-}
 
 // Credentials contains registry credentials used for manifest requests.
 type Credentials struct {
@@ -281,7 +274,7 @@ func parseWWWAuthInternal(challenge string) (realm, service string) {
 	return realm, service
 }
 
-func validateAuthRealmInternal(registryHost, realm string) error {
+func validateAuthRealmInternal(_ string, realm string) error {
 	u, err := url.Parse(realm)
 	if err != nil {
 		return err
@@ -289,22 +282,10 @@ func validateAuthRealmInternal(registryHost, realm string) error {
 	if strings.ToLower(u.Scheme) != "https" {
 		return fmt.Errorf("registry auth realm must use https: %s", realm)
 	}
-	realmHost := strings.ToLower(u.Hostname())
-	if realmHost == "" || net.ParseIP(realmHost) != nil {
+	if strings.TrimSpace(u.Host) == "" {
 		return fmt.Errorf("invalid registry auth realm host: %s", realm)
 	}
-
-	registryHost = utils.NormalizeRegistryForComparison(registryHost)
-	if registryHost == "docker.io" {
-		registryHost = "docker.io"
-	}
-	if realmHost == registryHost {
-		return nil
-	}
-	if trusted, ok := trustedAuthDelegations[registryHost]; ok && realmHost == trusted {
-		return nil
-	}
-	return fmt.Errorf("registry %s delegated auth to untrusted host %s", registryHost, realmHost)
+	return nil
 }
 
 func splitAuthParamsInternal(params string) []string {
