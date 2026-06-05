@@ -68,7 +68,11 @@ func (p defaultImagePuller) PullImage(ctx context.Context, imageRef string, prog
 	if err != nil {
 		return fmt.Errorf("docker connect: %w", err)
 	}
-	resp, err := dcli.ImagePull(ctx, imageRef, client.ImagePullOptions{})
+	pullOptions, err := defaultImagePullOptionsInternal(imageRef)
+	if err != nil {
+		return fmt.Errorf("registry auth: %w", err)
+	}
+	resp, err := dcli.ImagePull(ctx, imageRef, pullOptions)
 	if err != nil {
 		return err
 	}
@@ -93,5 +97,9 @@ func (r defaultRegistryDigestResolver) GetImageDigest(ctx context.Context, image
 	if err != nil {
 		return "", err
 	}
-	return registry.FetchDigest(ctx, parsed.RegistryHost, parsed.Repository, parsed.Tag, nil, r.httpClient)
+	credential, err := defaultDigestCredentialsInternal(imageRef)
+	if err != nil {
+		return "", fmt.Errorf("registry auth: %w", err)
+	}
+	return registry.FetchDigest(ctx, parsed.RegistryHost, parsed.Repository, parsed.Tag, credential, r.httpClient)
 }
