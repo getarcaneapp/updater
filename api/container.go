@@ -155,11 +155,8 @@ func (s *Service) UpdateContainer(ctx context.Context, containerID string, opts 
 // UpdateStandaloneContainer recreates a non-compose container with newRef.
 func (s *Service) UpdateStandaloneContainer(ctx context.Context, cnt container.Summary, inspect container.InspectResponse, newRef string) error {
 	labels := labelsFromInspectInternal(inspect)
-	if utils.ComposeProjectLabel(labels) != "" && utils.ComposeServiceLabel(labels) != "" && !s.config.AllowComposeStandaloneFallback {
-		return errors.New("compose container update requires ProjectUpdater unless standalone fallback is enabled")
-	}
-	if s.config.LabelPolicy.IsSelfUpdateTarget(labels) {
-		return errors.New("self-update containers must use SelfUpdater")
+	if err := s.validateStandaloneContainerUpdateInternal(labels); err != nil {
+		return err
 	}
 
 	dcli, err := s.dockerClientInternal(ctx)
@@ -167,6 +164,25 @@ func (s *Service) UpdateStandaloneContainer(ctx context.Context, cnt container.S
 		return fmt.Errorf("docker connect: %w", err)
 	}
 
+	if err := s.stopAndRemoveStandaloneContainerInternal(ctx, dcli, cnt, inspect); err != nil {
+		return err
+	}
+	_, err = s.createAndStartStandaloneContainerInternal(ctx, dcli, cnt, inspect, newRef)
+	return err
+}
+
+func (s *Service) validateStandaloneContainerUpdateInternal(labels map[string]string) error {
+	if utils.ComposeProjectLabel(labels) != "" && utils.ComposeServiceLabel(labels) != "" && !s.config.AllowComposeStandaloneFallback {
+		return errors.New("compose container update requires ProjectUpdater unless standalone fallback is enabled")
+	}
+	if s.config.LabelPolicy.IsSelfUpdateTarget(labels) {
+		return errors.New("self-update containers must use SelfUpdater")
+	}
+	return nil
+}
+
+func (s *Service) stopAndRemoveStandaloneContainerInternal(ctx context.Context, dcli *client.Client, cnt container.Summary, inspect container.InspectResponse) error {
+	labels := labelsFromInspectInternal(inspect)
 	name := utils.ContainerSummaryName(cnt)
 	stopOptions := client.ContainerStopOptions{}
 	if signal := s.config.LabelPolicy.StopSignal(labels); signal != "" {
@@ -181,7 +197,11 @@ func (s *Service) UpdateStandaloneContainer(ctx context.Context, cnt container.S
 		return fmt.Errorf("remove: %w", err)
 	}
 	_ = s.recordEventInternal(ctx, "container_delete", cnt.ID, name, types.ResourceTypeContainer, map[string]any{"action": "updater_delete"})
+	return nil
+}
 
+func (s *Service) createAndStartStandaloneContainerInternal(ctx context.Context, dcli *client.Client, cnt container.Summary, inspect container.InspectResponse, newRef string) (string, error) {
+	name := utils.ContainerSummaryName(cnt)
 	cfg := inspect.Config
 	if cfg == nil {
 		cfg = &container.Config{}
@@ -198,7 +218,7 @@ func (s *Service) UpdateStandaloneContainer(ctx context.Context, cnt container.S
 
 	hostConfig, _, _, err := utils.PrepareRecreateHostConfigForEngine(ctx, dcli, inspect.HostConfig)
 	if err != nil {
-		return fmt.Errorf("prepare host config: %w", err)
+		return "", fmt.Errorf("prepare host config: %w", err)
 	}
 	var networkMode container.NetworkMode
 	if hostConfig != nil {
@@ -226,33 +246,38 @@ func (s *Service) UpdateStandaloneContainer(ctx context.Context, cnt container.S
 		Name:             containerName,
 	}, apiVersion)
 	if err != nil {
-		return fmt.Errorf("create: %w", err)
+		return "", fmt.Errorf("create: %w", err)
 	}
 	_ = s.recordEventInternal(ctx, "container_create", resp.ID, name, types.ResourceTypeContainer, map[string]any{"action": "updater_create", "newImageID": resp.ID})
 
 	if _, err := dcli.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
-		return fmt.Errorf("start: %w", err)
+		return resp.ID, fmt.Errorf("start: %w", err)
 	}
 	_ = s.recordEventInternal(ctx, "container_start", resp.ID, name, types.ResourceTypeContainer, map[string]any{"action": "updater_start"})
-	return s.recordEventInternal(ctx, "container_update", resp.ID, name, types.ResourceTypeContainer, map[string]any{"oldContainerID": cnt.ID, "newContainerID": resp.ID, "newImage": newRef})
+	return resp.ID, s.recordEventInternal(ctx, "container_update", resp.ID, name, types.ResourceTypeContainer, map[string]any{"oldContainerID": cnt.ID, "newContainerID": resp.ID, "newImage": newRef})
 }
 
 // ResolvePullableImageRef chooses the best pullable image reference for a container.
 func ResolvePullableImageRef(summaryImage, inspectConfigImage string, repoTags []string) (ref, source string) {
-	if image := strings.TrimSpace(inspectConfigImage); image != "" && !refs.IsImageIDLikeReference(image) {
+	if image := strings.TrimSpace(inspectConfigImage); isMutablePullableImageRefInternal(image) {
 		return image, "container_inspect_config"
 	}
-	if image := strings.TrimSpace(summaryImage); image != "" && !refs.IsImageIDLikeReference(image) {
+	if image := strings.TrimSpace(summaryImage); isMutablePullableImageRefInternal(image) {
 		return image, "container_summary"
 	}
 	for _, tag := range repoTags {
 		trimmed := strings.TrimSpace(tag)
-		if trimmed == "" || trimmed == "<none>:<none>" || refs.IsImageIDLikeReference(trimmed) {
+		if trimmed == "<none>:<none>" || !isMutablePullableImageRefInternal(trimmed) {
 			continue
 		}
 		return trimmed, "image_repo_tag"
 	}
 	return "", ""
+}
+
+func isMutablePullableImageRefInternal(imageRef string) bool {
+	imageRef = strings.TrimSpace(imageRef)
+	return imageRef != "" && !refs.IsImageIDLikeReference(imageRef) && !refs.IsDigestPinnedReference(imageRef)
 }
 
 func (s *Service) updateComposeOrStandaloneInternal(ctx context.Context, target container.Summary, inspect container.InspectResponse, normalizedRef string) error {

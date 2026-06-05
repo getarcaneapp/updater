@@ -9,6 +9,8 @@ func (s *Service) applyResultCountInternal(out *types.Result, item types.Resourc
 	switch item.Status {
 	case types.StatusUpdated:
 		out.Updated++
+	case types.StatusRestarted:
+		out.Restarted++
 	case types.StatusSkipped:
 		out.Skipped++
 	case types.StatusFailed:

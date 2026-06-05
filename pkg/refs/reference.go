@@ -6,6 +6,7 @@ import (
 
 	ref "github.com/distribution/reference"
 	"github.com/getarcaneapp/updater/pkg/utils"
+	"github.com/opencontainers/go-digest"
 )
 
 // Reference is a normalized Docker image reference.
@@ -46,6 +47,9 @@ func NormalizeReference(imageRef string) (*Reference, error) {
 
 // NormalizeImageUpdateRef returns the canonical image reference key used for update match.
 func NormalizeImageUpdateRef(imageRef string) string {
+	if IsDigestPinnedReference(imageRef) {
+		return ""
+	}
 	parts, err := NormalizeReference(imageRef)
 	if err != nil {
 		return ""
@@ -57,4 +61,14 @@ func NormalizeImageUpdateRef(imageRef string) string {
 func IsImageIDLikeReference(ref string) bool {
 	ref = strings.ToLower(strings.TrimSpace(ref))
 	return strings.HasPrefix(ref, "sha256:")
+}
+
+// IsDigestPinnedReference reports whether ref names an immutable repository digest.
+func IsDigestPinnedReference(ref string) bool {
+	_, digestValue, ok := strings.Cut(strings.TrimSpace(ref), "@")
+	if !ok {
+		return false
+	}
+	_, err := digest.Parse(strings.TrimSpace(digestValue))
+	return err == nil
 }

@@ -28,6 +28,8 @@ const (
 	StatusChecked = "checked"
 	// StatusUpdated indicates a resource was updated.
 	StatusUpdated = "updated"
+	// StatusRestarted indicates a resource was restarted because a dependency changed.
+	StatusRestarted = "restarted"
 	// StatusSkipped indicates a resource was skipped.
 	StatusSkipped = "skipped"
 	// StatusFailed indicates a resource failed to update.
@@ -65,6 +67,7 @@ type Result struct {
 	Success    bool             `json:"success,omitempty"`
 	Checked    int              `json:"checked"`
 	Updated    int              `json:"updated"`
+	Restarted  int              `json:"restarted,omitempty"`
 	Skipped    int              `json:"skipped"`
 	Failed     int              `json:"failed"`
 	StartTime  string           `json:"startTime,omitempty"`

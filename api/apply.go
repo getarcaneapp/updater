@@ -108,6 +108,18 @@ func (s *Service) ApplyPending(ctx context.Context, opts types.Options) (out *ty
 			continue
 		}
 
+		if !opts.Force {
+			targetIDs, targetErr := digestChecker.GetImageIDsForRef(ctx, plan.newRef)
+			if targetErr == nil && imageIDsOverlapInternal(plan.oldIDs, targetIDs) {
+				item.Status = types.StatusUpToDate
+				item.Error = "image digest unchanged after pull"
+				plans[i].pulled = true
+				out.Items = append(out.Items, item)
+				_ = s.recordResultInternal(ctx, item)
+				continue
+			}
+		}
+
 		item.Status = types.StatusUpdated
 		item.UpdateApplied = true
 		item.UpdateAvailable = true
@@ -186,6 +198,25 @@ func (s *Service) buildUpdatePlansInternal(ctx context.Context, records []types.
 		plans = append(plans, updatePlan{record: record, oldRef: oldRef, newRef: newRef, oldIDs: oldIDs})
 	}
 	return plans
+}
+
+func imageIDsOverlapInternal(oldIDs, newIDs []string) bool {
+	seen := map[string]struct{}{}
+	for _, oldID := range oldIDs {
+		oldID = strings.TrimSpace(oldID)
+		if oldID != "" {
+			seen[oldID] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return false
+	}
+	for _, newID := range newIDs {
+		if _, ok := seen[strings.TrimSpace(newID)]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Service) usedImagesInternal(ctx context.Context) (map[string]struct{}, error) {

@@ -25,3 +25,32 @@ func TestNormalizeReferenceInternal(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeImageUpdateRefSkipsDigestPinnedReferencesInternal(t *testing.T) {
+	pinnedRef := "nginx@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	if got := NormalizeImageUpdateRef(pinnedRef); got != "" {
+		t.Fatalf("NormalizeImageUpdateRef(%q) = %q, want empty for pinned digest ref", pinnedRef, got)
+	}
+}
+
+func TestIsDigestPinnedReferenceInternal(t *testing.T) {
+	tests := []struct {
+		name     string
+		imageRef string
+		want     bool
+	}{
+		{name: "tagged image", imageRef: "nginx:1.27", want: false},
+		{name: "image id", imageRef: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", want: false},
+		{name: "digest pinned", imageRef: "nginx@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", want: true},
+		{name: "invalid digest suffix", imageRef: "nginx@sha256:not-a-digest", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsDigestPinnedReference(tt.imageRef); got != tt.want {
+				t.Fatalf("IsDigestPinnedReference(%q) = %v, want %v", tt.imageRef, got, tt.want)
+			}
+		})
+	}
+}

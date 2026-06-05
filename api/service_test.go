@@ -2,17 +2,21 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 
+	"github.com/getarcaneapp/updater/pkg/labels"
 	"github.com/getarcaneapp/updater/types"
 	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/api/types/image"
 	"github.com/moby/moby/client"
-	ocidigest "github.com/opencontainers/go-digest"
+	"github.com/opencontainers/go-digest"
 )
 
 type fakeDockerClientProvider struct {
@@ -61,6 +65,37 @@ type fakeDigestResolver struct{}
 
 func (fakeDigestResolver) GetImageDigest(ctx context.Context, imageRef string) (string, error) {
 	return "", nil
+}
+
+func newDockerClientForHandlerInternal(t *testing.T, handler http.HandlerFunc) *client.Client {
+	t.Helper()
+
+	server := httptest.NewServer(handler)
+	t.Cleanup(server.Close)
+
+	dcli, err := client.New(client.WithHost(server.URL), client.WithAPIVersion("1.41"))
+	if err != nil {
+		t.Fatalf("new docker client: %v", err)
+	}
+	return dcli
+}
+
+func dockerAPIPathInternal(path string) string {
+	trimmed := strings.TrimPrefix(path, "/")
+	version, rest, ok := strings.Cut(trimmed, "/")
+	if ok && strings.HasPrefix(version, "v") {
+		return "/" + rest
+	}
+	return path
+}
+
+func writeDockerJSONInternal(t *testing.T, w http.ResponseWriter, value any) {
+	t.Helper()
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(value); err != nil {
+		t.Fatalf("write json response: %v", err)
+	}
 }
 
 func TestNewServiceAppliesGenericDockerDefaultsInternal(t *testing.T) {
@@ -144,7 +179,7 @@ func TestMemoryPendingStoreReadsAndClearsRecordsInternal(t *testing.T) {
 }
 
 func TestDefaultRegistryDigestResolverFetchesDigestInternal(t *testing.T) {
-	want := ocidigest.FromString("manifest").String()
+	want := digest.FromString("manifest").String()
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v2/owner/app/manifests/1.0" {
 			http.Error(w, "unexpected manifest path", http.StatusNotFound)
@@ -205,6 +240,199 @@ func TestApplyPendingDryRunRecordsSkippedImageInternal(t *testing.T) {
 	}
 }
 
+func TestApplyPendingSkipsUnchangedPulledImageInternal(t *testing.T) {
+	store := &fakePendingStore{records: []types.ImageUpdateRecord{{
+		ID:         "record-1",
+		Repository: "nginx",
+		Tag:        "1.27",
+		HasUpdate:  true,
+		UpdateType: types.UpdateTypeDigest,
+	}}}
+	puller := &fakePuller{}
+	dcli := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		switch dockerAPIPathInternal(r.URL.Path) {
+		case "/images/nginx:1.27/json":
+			writeDockerJSONInternal(t, w, image.InspectResponse{
+				ID:       "sha256:same",
+				RepoTags: []string{"nginx:1.27"},
+			})
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	service := newServiceInternal(Config{
+		DockerClientProvider: fakeDockerClientProvider{client: dcli},
+		PendingStore:         store,
+		ImagePuller:          puller,
+		UsedImageCollector: UsedImageCollectorFunc(func(context.Context) (map[string]struct{}, error) {
+			return map[string]struct{}{"docker.io/library/nginx:1.27": {}}, nil
+		}),
+	})
+
+	got, err := service.ApplyPending(context.Background(), types.Options{})
+	if err != nil {
+		t.Fatalf("ApplyPending() error = %v", err)
+	}
+	if got.Checked != 1 || got.Updated != 0 || got.Skipped != 0 || got.Failed != 0 {
+		t.Fatalf("ApplyPending() counts = checked:%d updated:%d skipped:%d failed:%d", got.Checked, got.Updated, got.Skipped, got.Failed)
+	}
+	if len(got.Items) != 1 || got.Items[0].Status != types.StatusUpToDate {
+		t.Fatalf("ApplyPending() items = %#v, want one up-to-date item", got.Items)
+	}
+	if len(puller.pulled) != 1 || puller.pulled[0] != "nginx:1.27" {
+		t.Fatalf("pulled images = %#v, want nginx:1.27", puller.pulled)
+	}
+	if len(store.cleared) != 1 || store.cleared[0] != "record-1" {
+		t.Fatalf("cleared records = %#v, want record-1", store.cleared)
+	}
+}
+
+func TestApplyPendingForceBypassesUnchangedPulledImageSkipInternal(t *testing.T) {
+	store := &fakePendingStore{records: []types.ImageUpdateRecord{{
+		ID:         "record-1",
+		Repository: "nginx",
+		Tag:        "1.27",
+		HasUpdate:  true,
+		UpdateType: types.UpdateTypeDigest,
+	}}}
+	puller := &fakePuller{}
+	dcli := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		switch dockerAPIPathInternal(r.URL.Path) {
+		case "/images/nginx:1.27/json":
+			writeDockerJSONInternal(t, w, image.InspectResponse{
+				ID:       "sha256:same",
+				RepoTags: []string{"nginx:1.27"},
+			})
+		case "/containers/json":
+			writeDockerJSONInternal(t, w, []container.Summary{})
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	service := newServiceInternal(Config{
+		DockerClientProvider: fakeDockerClientProvider{client: dcli},
+		PendingStore:         store,
+		ImagePuller:          puller,
+		UsedImageCollector: UsedImageCollectorFunc(func(context.Context) (map[string]struct{}, error) {
+			return map[string]struct{}{"docker.io/library/nginx:1.27": {}}, nil
+		}),
+	})
+
+	got, err := service.ApplyPending(context.Background(), types.Options{Force: true})
+	if err != nil {
+		t.Fatalf("ApplyPending() error = %v", err)
+	}
+	if got.Checked != 1 || got.Updated != 1 || got.Skipped != 0 || got.Failed != 0 {
+		t.Fatalf("ApplyPending() counts = checked:%d updated:%d skipped:%d failed:%d", got.Checked, got.Updated, got.Skipped, got.Failed)
+	}
+	if len(got.Items) == 0 || got.Items[0].Status != types.StatusUpdated {
+		t.Fatalf("ApplyPending() first item = %#v, want updated", got.Items)
+	}
+	if len(store.cleared) != 1 || store.cleared[0] != "record-1" {
+		t.Fatalf("cleared records = %#v, want record-1", store.cleared)
+	}
+}
+
+func TestRestartContainersUsingOldImagesRestartsDependenciesInWatchtowerOrderInternal(t *testing.T) {
+	operations := []string{}
+	createIDs := map[string]string{"db": "new-db-id", "web": "new-web-id"}
+
+	dcli := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		path := dockerAPIPathInternal(r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && path == "/containers/json":
+			writeDockerJSONInternal(t, w, []container.Summary{
+				{ID: "db-id", Names: []string{"/db"}, Image: "db:1", ImageID: "sha256:old-db", State: "running"},
+				{ID: "web-id", Names: []string{"/web"}, Image: "web:1", ImageID: "sha256:web", Labels: map[string]string{labels.LabelDependsOn: "db"}, State: "running"},
+			})
+		case r.Method == http.MethodGet && path == "/containers/db-id/json":
+			writeDockerJSONInternal(t, w, container.InspectResponse{
+				ID:    "db-id",
+				Name:  "/db",
+				Image: "sha256:old-db",
+				Config: &container.Config{
+					Image: "db:1",
+				},
+			})
+		case r.Method == http.MethodGet && path == "/containers/web-id/json":
+			writeDockerJSONInternal(t, w, container.InspectResponse{
+				ID:    "web-id",
+				Name:  "/web",
+				Image: "sha256:web",
+				Config: &container.Config{
+					Image:  "web:1",
+					Labels: map[string]string{labels.LabelDependsOn: "db"},
+				},
+			})
+		case r.Method == http.MethodGet && path == "/images/db:2/json":
+			writeDockerJSONInternal(t, w, image.InspectResponse{ID: "sha256:new-db"})
+		case r.Method == http.MethodGet && path == "/images/web:1/json":
+			writeDockerJSONInternal(t, w, image.InspectResponse{ID: "sha256:web"})
+		case r.Method == http.MethodPost && strings.HasPrefix(path, "/containers/") && strings.HasSuffix(path, "/stop"):
+			id := strings.TrimSuffix(strings.TrimPrefix(path, "/containers/"), "/stop")
+			operations = append(operations, "stop:"+id)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete && strings.HasPrefix(path, "/containers/"):
+			id := strings.TrimPrefix(path, "/containers/")
+			operations = append(operations, "remove:"+id)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && path == "/containers/create":
+			name := r.URL.Query().Get("name")
+			operations = append(operations, "create:"+name)
+			writeDockerJSONInternal(t, w, map[string]any{"Id": createIDs[name], "Warnings": []string{}})
+		case r.Method == http.MethodPost && strings.HasPrefix(path, "/containers/") && strings.HasSuffix(path, "/start"):
+			id := strings.TrimSuffix(strings.TrimPrefix(path, "/containers/"), "/start")
+			operations = append(operations, "start:"+id)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	service := newServiceInternal(Config{
+		DockerClientProvider: fakeDockerClientProvider{client: dcli},
+	})
+
+	results, err := service.RestartContainersUsingOldImages(context.Background(), map[string]string{"sha256:old-db": "db:2"}, nil)
+	if err != nil {
+		t.Fatalf("RestartContainersUsingOldImages() error = %v", err)
+	}
+	assertOperationsInOrderInternal(t, operations, []string{
+		"stop:web-id",
+		"stop:db-id",
+		"start:new-db-id",
+		"start:new-web-id",
+	})
+	statusByName := map[string]string{}
+	for _, result := range results {
+		statusByName[result.ResourceName] = result.Status
+	}
+	if statusByName["db"] != types.StatusUpdated {
+		t.Fatalf("db status = %q, want updated; results=%#v", statusByName["db"], results)
+	}
+	if statusByName["web"] != types.StatusRestarted {
+		t.Fatalf("web status = %q, want restarted; results=%#v", statusByName["web"], results)
+	}
+}
+
+func assertOperationsInOrderInternal(t *testing.T, operations, want []string) {
+	t.Helper()
+
+	start := 0
+	for _, target := range want {
+		found := false
+		for i := start; i < len(operations); i++ {
+			if operations[i] == target {
+				start = i + 1
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("operations = %#v, want %q after index %d", operations, target, start)
+		}
+	}
+}
+
 func TestStatusTracksContainersInternal(t *testing.T) {
 	service := NewService(Config{})
 	done := service.BeginContainerUpdate("abc")
@@ -228,6 +456,12 @@ func TestResolvePullableImageRefInternal(t *testing.T) {
 	ref, source = ResolvePullableImageRef("sha256:abc", "", []string{"redis:7"})
 	if ref != "redis:7" || source != "image_repo_tag" {
 		t.Fatalf("ResolvePullableImageRef() fallback = %q/%q, want repo tag", ref, source)
+	}
+
+	pinnedRef := "nginx@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	ref, source = ResolvePullableImageRef("sha256:abc", pinnedRef, []string{pinnedRef})
+	if ref != "" || source != "" {
+		t.Fatalf("ResolvePullableImageRef() digest-pinned fallback = %q/%q, want empty", ref, source)
 	}
 }
 
