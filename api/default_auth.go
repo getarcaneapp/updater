@@ -74,13 +74,13 @@ func defaultDockerConfigRegistryAuthConfigInternal(imageRef string) (dockerregis
 	}
 
 	authConfig, err := configFile.GetAuthConfig(server)
-	if err != nil {
-		return dockerregistry.AuthConfig{}, false, nil
+	if err == nil {
+		if defaultDockerConfigAuthEmptyInternal(authConfig) {
+			return dockerregistry.AuthConfig{}, false, nil
+		}
+		return dockerRegistryAuthConfigFromDockerConfigInternal(authConfig), true, nil
 	}
-	if defaultDockerConfigAuthEmptyInternal(authConfig) {
-		return dockerregistry.AuthConfig{}, false, nil
-	}
-	return dockerRegistryAuthConfigFromDockerConfigInternal(authConfig), true, nil
+	return dockerregistry.AuthConfig{}, false, nil
 }
 
 func dockerRegistryAuthConfigFromDockerConfigInternal(authConfig dockerCliConfigTypes.AuthConfig) dockerregistry.AuthConfig {
