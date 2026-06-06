@@ -62,6 +62,11 @@ func FromReferenceSuffix(ref string) (string, bool) {
 // CheckImageNeedsUpdate compares local and remote digests for an image.
 func (c *Checker) CheckImageNeedsUpdate(ctx context.Context, imageRef string) CheckResult {
 	result := CheckResult{}
+	if pinnedDigest, ok := FromReferenceSuffix(imageRef); ok {
+		result.LocalDigest = pinnedDigest
+		result.RemoteDigest = pinnedDigest
+		return result
+	}
 	if c == nil || c.dcli == nil {
 		result.Error = errors.New("docker client unavailable")
 		return result
