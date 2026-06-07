@@ -11,8 +11,17 @@ func TestDefaultLabelPolicyInternal(t *testing.T) {
 	if !policy.IsSelfUpdateTarget(map[string]string{LabelArcane: "true"}) {
 		t.Fatal("Arcane server label was not treated as self-update target")
 	}
+	if !policy.IsSelfUpdateTarget(map[string]string{LabelArcaneLegacyServer: "true"}) {
+		t.Fatal("legacy Arcane server label was not treated as self-update target")
+	}
 	if !policy.IsSelfUpdateTarget(map[string]string{LabelArcaneAgent: "1"}) {
 		t.Fatal("Arcane agent label was not treated as self-update target")
+	}
+	if !policy.IsServer(map[string]string{LabelArcaneLegacyServer: "true"}) {
+		t.Fatal("legacy Arcane server label was not treated as server")
+	}
+	if policy.IsServer(map[string]string{LabelArcaneLegacyServer: "true", LabelArcaneAgent: "true"}) {
+		t.Fatal("agent label did not exclude legacy Arcane server label")
 	}
 	if !policy.IsUpdateDisabled(map[string]string{LabelUpdater: "off"}) {
 		t.Fatal("updater off label was not treated as disabled")
@@ -40,6 +49,13 @@ func TestShouldDisableArcaneServerRedeployInternal(t *testing.T) {
 		{
 			name:               "current Arcane server container",
 			labels:             map[string]string{LabelArcane: "true"},
+			containerID:        "abcdef1234567890",
+			currentContainerID: "abcdef1234567890",
+			want:               true,
+		},
+		{
+			name:               "current legacy Arcane server container",
+			labels:             map[string]string{LabelArcaneLegacyServer: "true"},
 			containerID:        "abcdef1234567890",
 			currentContainerID: "abcdef1234567890",
 			want:               true,
