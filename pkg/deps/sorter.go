@@ -7,8 +7,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/getarcaneapp/updater/pkg/labels"
-	"github.com/getarcaneapp/updater/pkg/utils"
+	"go.getarcane.app/updater/pkg/labels"
+	"go.getarcane.app/updater/pkg/utils"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 )

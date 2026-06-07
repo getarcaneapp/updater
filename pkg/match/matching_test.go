@@ -3,7 +3,7 @@ package match
 import (
 	"testing"
 
-	"github.com/getarcaneapp/updater/pkg/refs"
+	"go.getarcane.app/updater/pkg/refs"
 	"github.com/moby/moby/api/types/container"
 )
 

@@ -5,7 +5,7 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/getarcaneapp/updater/types"
+	"go.getarcane.app/updater/types"
 )
 
 type memoryPendingStore struct {

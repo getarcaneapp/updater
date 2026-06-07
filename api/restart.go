@@ -5,12 +5,12 @@ import (
 	"fmt"
 	"slices"
 
-	"github.com/getarcaneapp/updater/pkg/deps"
-	"github.com/getarcaneapp/updater/pkg/digest"
-	"github.com/getarcaneapp/updater/pkg/match"
-	"github.com/getarcaneapp/updater/pkg/refs"
-	"github.com/getarcaneapp/updater/pkg/utils"
-	"github.com/getarcaneapp/updater/types"
+	"go.getarcane.app/updater/pkg/deps"
+	"go.getarcane.app/updater/pkg/digest"
+	"go.getarcane.app/updater/pkg/match"
+	"go.getarcane.app/updater/pkg/refs"
+	"go.getarcane.app/updater/pkg/utils"
+	"go.getarcane.app/updater/types"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 )

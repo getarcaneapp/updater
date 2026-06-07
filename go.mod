@@ -1,6 +1,6 @@
-module github.com/getarcaneapp/updater
+module go.getarcane.app/updater
 
-go 1.26.3
+go 1.26.4
 
 require (
 	github.com/distribution/reference v0.6.0

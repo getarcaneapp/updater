@@ -7,7 +7,7 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/getarcaneapp/updater/pkg/refs"
+	"go.getarcane.app/updater/pkg/refs"
 	"github.com/moby/moby/client"
 	ocidigest "github.com/opencontainers/go-digest"
 )

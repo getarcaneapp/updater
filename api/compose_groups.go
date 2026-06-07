@@ -3,8 +3,8 @@ package api
 import (
 	"context"
 
-	"github.com/getarcaneapp/updater/pkg/deps"
-	"github.com/getarcaneapp/updater/pkg/utils"
+	"go.getarcane.app/updater/pkg/deps"
+	"go.getarcane.app/updater/pkg/utils"
 )
 
 type composeGroup struct {

@@ -7,8 +7,8 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/getarcaneapp/updater/pkg/utils"
-	"github.com/getarcaneapp/updater/types"
+	"go.getarcane.app/updater/pkg/utils"
+	"go.getarcane.app/updater/types"
 	"github.com/moby/moby/client"
 )
 

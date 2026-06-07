@@ -8,8 +8,8 @@ import (
 
 	dockerCliConfig "github.com/docker/cli/cli/config"
 	dockerCliConfigTypes "github.com/docker/cli/cli/config/types"
-	updaterregistry "github.com/getarcaneapp/updater/pkg/registry"
-	"github.com/getarcaneapp/updater/pkg/utils"
+	updaterregistry "go.getarcane.app/updater/pkg/registry"
+	"go.getarcane.app/updater/pkg/utils"
 	dockerauthconfig "github.com/moby/moby/api/pkg/authconfig"
 	dockerregistry "github.com/moby/moby/api/types/registry"
 	"github.com/moby/moby/client"

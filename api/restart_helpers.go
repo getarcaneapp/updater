@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/getarcaneapp/updater/pkg/deps"
-	"github.com/getarcaneapp/updater/types"
+	"go.getarcane.app/updater/pkg/deps"
+	"go.getarcane.app/updater/types"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
 )

@@ -3,7 +3,7 @@ package labels
 import (
 	"strings"
 
-	"github.com/getarcaneapp/updater/types"
+	"go.getarcane.app/updater/types"
 )
 
 const (

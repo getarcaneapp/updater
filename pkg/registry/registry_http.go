@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getarcaneapp/updater/pkg/utils"
+	"go.getarcane.app/updater/pkg/utils"
 )
 
 const defaultRegistryHost = "registry-1.docker.io"

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"maps"
 
-	"github.com/getarcaneapp/updater/types"
+	"go.getarcane.app/updater/types"
 )
 
 func (s *Service) triggerSelfUpdateInternal(ctx context.Context, containerID, containerName string, labels map[string]string) error {

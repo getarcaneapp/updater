@@ -4,7 +4,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/getarcaneapp/updater/types"
+	"go.getarcane.app/updater/types"
 )
 
 // Status returns a point-in-time updater status snapshot.

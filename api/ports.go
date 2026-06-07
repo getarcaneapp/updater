@@ -5,8 +5,8 @@ import (
 	"io"
 	"log/slog"
 
-	"github.com/getarcaneapp/updater/pkg/digest"
-	"github.com/getarcaneapp/updater/types"
+	"go.getarcane.app/updater/pkg/digest"
+	"go.getarcane.app/updater/types"
 	"github.com/moby/moby/client"
 )
 

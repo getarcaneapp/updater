@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	ref "github.com/distribution/reference"
-	"github.com/getarcaneapp/updater/pkg/utils"
+	"go.getarcane.app/updater/pkg/utils"
 	"github.com/opencontainers/go-digest"
 )
 

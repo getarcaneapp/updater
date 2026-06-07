@@ -5,8 +5,8 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/getarcaneapp/updater/pkg/labels"
-	"github.com/getarcaneapp/updater/types"
+	"go.getarcane.app/updater/pkg/labels"
+	"go.getarcane.app/updater/types"
 	"github.com/moby/moby/api/types/container"
 )
 

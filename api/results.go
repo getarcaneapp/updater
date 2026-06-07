@@ -1,7 +1,7 @@
 package api
 
 import (
-	"github.com/getarcaneapp/updater/types"
+	"go.getarcane.app/updater/types"
 	"github.com/moby/moby/api/types/container"
 )
 
