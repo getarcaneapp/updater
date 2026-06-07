@@ -67,6 +67,32 @@ func (fakeDigestResolver) GetImageDigest(ctx context.Context, imageRef string) (
 	return "", nil
 }
 
+type fakeProjectUpdater struct {
+	projects    map[string]types.ComposeProject
+	updateCalls []string
+}
+
+func (f *fakeProjectUpdater) ProjectByComposeName(ctx context.Context, composeName string) (types.ComposeProject, error) {
+	if project, ok := f.projects[composeName]; ok {
+		return project, nil
+	}
+	return types.ComposeProject{}, errors.New("project not found")
+}
+
+func (f *fakeProjectUpdater) UpdateServices(ctx context.Context, projectID string, services []string) error {
+	f.updateCalls = append(f.updateCalls, projectID+":"+strings.Join(services, ","))
+	return nil
+}
+
+type fakeSelfUpdater struct {
+	targets []types.SelfUpdateTarget
+}
+
+func (f *fakeSelfUpdater) TriggerSelfUpdate(ctx context.Context, target types.SelfUpdateTarget) error {
+	f.targets = append(f.targets, target)
+	return nil
+}
+
 func newDockerClientForHandlerInternal(t *testing.T, handler http.HandlerFunc) *client.Client {
 	t.Helper()
 
@@ -411,6 +437,87 @@ func TestRestartContainersUsingOldImagesRestartsDependenciesInWatchtowerOrderInt
 	}
 	if statusByName["web"] != types.StatusRestarted {
 		t.Fatalf("web status = %q, want restarted; results=%#v", statusByName["web"], results)
+	}
+}
+
+func TestRestartContainersUsingOldImagesRoutesLegacyArcaneServerThroughSelfUpdaterInternal(t *testing.T) {
+	projectUpdater := &fakeProjectUpdater{
+		projects: map[string]types.ComposeProject{
+			"arcane": {ID: "project-arcane", Name: "arcane"},
+		},
+	}
+	selfUpdater := &fakeSelfUpdater{}
+	operations := []string{}
+
+	dcli := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		path := dockerAPIPathInternal(r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && path == "/containers/json":
+			writeDockerJSONInternal(t, w, []container.Summary{
+				{
+					ID:      "arcane-id",
+					Names:   []string{"/arcane"},
+					Image:   "ghcr.io/getarcaneapp/arcane:1",
+					ImageID: "sha256:old-arcane",
+					Labels: map[string]string{
+						"com.docker.compose.project":   "arcane",
+						"com.docker.compose.service":   "server",
+						labels.LabelArcaneLegacyServer: "true",
+					},
+					State: "running",
+				},
+			})
+		case r.Method == http.MethodGet && path == "/containers/arcane-id/json":
+			writeDockerJSONInternal(t, w, container.InspectResponse{
+				ID:    "arcane-id",
+				Name:  "/arcane",
+				Image: "sha256:old-arcane",
+				Config: &container.Config{
+					Image: "ghcr.io/getarcaneapp/arcane:1",
+					Labels: map[string]string{
+						"com.docker.compose.project":   "arcane",
+						"com.docker.compose.service":   "server",
+						labels.LabelArcaneLegacyServer: "true",
+					},
+				},
+			})
+		case r.Method == http.MethodGet && path == "/images/ghcr.io/getarcaneapp/arcane:2/json":
+			writeDockerJSONInternal(t, w, image.InspectResponse{ID: "sha256:new-arcane"})
+		case r.Method == http.MethodPost && strings.Contains(path, "/containers/"):
+			operations = append(operations, r.Method+":"+path)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && strings.Contains(path, "/containers/"):
+			operations = append(operations, r.Method+":"+path)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	service := newServiceInternal(Config{
+		DockerClientProvider: fakeDockerClientProvider{client: dcli},
+		ProjectUpdater:       projectUpdater,
+		SelfUpdater:          selfUpdater,
+		LabelPolicy:          labels.DefaultLabelPolicy(),
+	})
+
+	results, err := service.RestartContainersUsingOldImages(context.Background(), map[string]string{"sha256:old-arcane": "ghcr.io/getarcaneapp/arcane:2"}, nil)
+	if err != nil {
+		t.Fatalf("RestartContainersUsingOldImages() error = %v", err)
+	}
+	if len(selfUpdater.targets) != 1 {
+		t.Fatalf("self-update targets = %#v, want exactly one", selfUpdater.targets)
+	}
+	if selfUpdater.targets[0].ContainerID != "arcane-id" || selfUpdater.targets[0].InstanceType != "server" {
+		t.Fatalf("self-update target = %#v, want arcane server", selfUpdater.targets[0])
+	}
+	if len(projectUpdater.updateCalls) != 0 {
+		t.Fatalf("project updater calls = %#v, want none", projectUpdater.updateCalls)
+	}
+	if len(operations) != 0 {
+		t.Fatalf("standalone container operations = %#v, want none", operations)
+	}
+	if len(results) != 1 || results[0].Status != types.StatusUpdated {
+		t.Fatalf("results = %#v, want one updated result", results)
 	}
 }
 

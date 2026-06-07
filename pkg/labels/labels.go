@@ -9,6 +9,8 @@ import (
 const (
 	// LabelArcane identifies an Arcane server container.
 	LabelArcane = "com.getarcaneapp.arcane"
+	// LabelArcaneLegacyServer identifies pre-migration Arcane server containers.
+	LabelArcaneLegacyServer = "com.getarcaneapp.arcane.server"
 	// LabelArcaneAgent identifies an Arcane agent container.
 	LabelArcaneAgent = "com.getarcaneapp.arcane.agent"
 	// LabelUpdater controls updater participation.
@@ -37,12 +39,12 @@ func DefaultLabelPolicy() types.LabelPolicy {
 
 // IsArcaneContainer reports whether labels identify an Arcane self-update target.
 func IsArcaneContainer(labels map[string]string) bool {
-	return hasTruthyLabelInternal(labels, LabelArcane) || IsArcaneAgentContainer(labels)
+	return hasTruthyLabelInternal(labels, LabelArcane) || hasTruthyLabelInternal(labels, LabelArcaneLegacyServer) || IsArcaneAgentContainer(labels)
 }
 
 // IsArcaneServerContainer reports whether labels identify an Arcane server.
 func IsArcaneServerContainer(labels map[string]string) bool {
-	return hasTruthyLabelInternal(labels, LabelArcane) && !IsArcaneAgentContainer(labels)
+	return (hasTruthyLabelInternal(labels, LabelArcane) || hasTruthyLabelInternal(labels, LabelArcaneLegacyServer)) && !IsArcaneAgentContainer(labels)
 }
 
 // ShouldDisableArcaneServerRedeploy reports whether redeploy should be blocked for a container.
