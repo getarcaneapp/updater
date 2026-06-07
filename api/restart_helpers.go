@@ -6,10 +6,10 @@ import (
 	"net/url"
 	"strings"
 
-	"go.getarcane.app/updater/pkg/deps"
-	"go.getarcane.app/updater/types"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
+	"go.getarcane.app/updater/pkg/deps"
+	"go.getarcane.app/updater/types"
 )
 
 func shouldSkipSummaryInternal(summary container.Summary, excludedContainers map[string]bool, dockerProxyName string, policy types.LabelPolicy) bool {

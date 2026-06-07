@@ -7,9 +7,9 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/moby/moby/client"
 	"go.getarcane.app/updater/pkg/utils"
 	"go.getarcane.app/updater/types"
-	"github.com/moby/moby/client"
 )
 
 type dockerComposeProjectUpdater struct {

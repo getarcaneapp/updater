@@ -5,14 +5,14 @@ import (
 	"fmt"
 	"slices"
 
+	"github.com/moby/moby/api/types/container"
+	"github.com/moby/moby/client"
 	"go.getarcane.app/updater/pkg/deps"
 	"go.getarcane.app/updater/pkg/digest"
 	"go.getarcane.app/updater/pkg/match"
 	"go.getarcane.app/updater/pkg/refs"
 	"go.getarcane.app/updater/pkg/utils"
 	"go.getarcane.app/updater/types"
-	"github.com/moby/moby/api/types/container"
-	"github.com/moby/moby/client"
 )
 
 // RestartContainersUsingOldImages restarts running containers matching old image IDs or refs.

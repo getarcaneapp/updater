@@ -11,12 +11,12 @@ import (
 	"strings"
 	"testing"
 
-	"go.getarcane.app/updater/pkg/labels"
-	"go.getarcane.app/updater/types"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/image"
 	"github.com/moby/moby/client"
 	"github.com/opencontainers/go-digest"
+	"go.getarcane.app/updater/pkg/labels"
+	"go.getarcane.app/updater/types"
 )
 
 type fakeDockerClientProvider struct {

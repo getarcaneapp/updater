@@ -7,10 +7,10 @@ import (
 	"slices"
 	"strings"
 
-	"go.getarcane.app/updater/pkg/labels"
-	"go.getarcane.app/updater/pkg/utils"
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
+	"go.getarcane.app/updater/pkg/labels"
+	"go.getarcane.app/updater/pkg/utils"
 )
 
 // ContainerWithDeps represents a container and its restart dependencies.

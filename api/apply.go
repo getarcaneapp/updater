@@ -8,12 +8,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/moby/moby/client"
 	"go.getarcane.app/updater/pkg/digest"
 	"go.getarcane.app/updater/pkg/match"
 	"go.getarcane.app/updater/pkg/refs"
 	"go.getarcane.app/updater/pkg/utils"
 	"go.getarcane.app/updater/types"
-	"github.com/moby/moby/client"
 )
 
 // ApplyPending applies pending image updates from the configured PendingStore.

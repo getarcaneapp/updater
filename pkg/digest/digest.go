@@ -7,9 +7,9 @@ import (
 	"log/slog"
 	"strings"
 
-	"go.getarcane.app/updater/pkg/refs"
 	"github.com/moby/moby/client"
 	ocidigest "github.com/opencontainers/go-digest"
+	"go.getarcane.app/updater/pkg/refs"
 )
 
 // RemoteResolver resolves a remote image digest without pulling.

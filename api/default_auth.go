@@ -8,11 +8,11 @@ import (
 
 	dockerCliConfig "github.com/docker/cli/cli/config"
 	dockerCliConfigTypes "github.com/docker/cli/cli/config/types"
-	updaterregistry "go.getarcane.app/updater/pkg/registry"
-	"go.getarcane.app/updater/pkg/utils"
 	dockerauthconfig "github.com/moby/moby/api/pkg/authconfig"
 	dockerregistry "github.com/moby/moby/api/types/registry"
 	"github.com/moby/moby/client"
+	updaterregistry "go.getarcane.app/updater/pkg/registry"
+	"go.getarcane.app/updater/pkg/utils"
 )
 
 func defaultImagePullOptionsInternal(imageRef string) (client.ImagePullOptions, error) {

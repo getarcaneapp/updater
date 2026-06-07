@@ -5,9 +5,9 @@ import (
 	"io"
 	"log/slog"
 
+	"github.com/moby/moby/client"
 	"go.getarcane.app/updater/pkg/digest"
 	"go.getarcane.app/updater/types"
-	"github.com/moby/moby/client"
 )
 
 // DockerClientProvider provides Docker clients.

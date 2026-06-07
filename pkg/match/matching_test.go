@@ -3,8 +3,8 @@ package match
 import (
 	"testing"
 
-	"go.getarcane.app/updater/pkg/refs"
 	"github.com/moby/moby/api/types/container"
+	"go.getarcane.app/updater/pkg/refs"
 )
 
 func TestResolveContainerImageMatchUsesInspectConfigImageInternal(t *testing.T) {

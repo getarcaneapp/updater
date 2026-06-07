@@ -5,8 +5,8 @@ import (
 	"strings"
 
 	ref "github.com/distribution/reference"
-	"go.getarcane.app/updater/pkg/utils"
 	"github.com/opencontainers/go-digest"
+	"go.getarcane.app/updater/pkg/utils"
 )
 
 // Reference is a normalized Docker image reference.

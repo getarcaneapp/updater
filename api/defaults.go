@@ -7,10 +7,10 @@ import (
 	"io"
 	"net/http"
 
+	"github.com/moby/moby/client"
 	"go.getarcane.app/updater/pkg/digest"
 	"go.getarcane.app/updater/pkg/refs"
 	"go.getarcane.app/updater/pkg/registry"
-	"github.com/moby/moby/client"
 )
 
 type defaultDockerClientProvider struct {

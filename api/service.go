@@ -5,9 +5,9 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/moby/moby/api/types/container"
 	"go.getarcane.app/updater/pkg/labels"
 	"go.getarcane.app/updater/types"
-	"github.com/moby/moby/api/types/container"
 )
 
 // Service coordinates Docker image updates, container recreation, and host adapters.

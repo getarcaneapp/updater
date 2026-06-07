@@ -1,8 +1,8 @@
 package api
 
 import (
-	"go.getarcane.app/updater/types"
 	"github.com/moby/moby/api/types/container"
+	"go.getarcane.app/updater/types"
 )
 
 func (s *Service) applyResultCountInternal(out *types.Result, item types.ResourceResult) {
