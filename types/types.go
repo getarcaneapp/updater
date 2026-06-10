@@ -166,6 +166,9 @@ type SelfUpdateTarget struct {
 	ContainerName string
 	InstanceType  string
 	Labels        map[string]string
+	// NewImageRef is the resolved image reference the self-updater should
+	// upgrade the container to. Empty when the updater could not resolve one.
+	NewImageRef string
 }
 
 // Notification describes a successful container update notification.

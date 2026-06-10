@@ -136,6 +136,8 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 	projectResults := map[string]error{}
 	standaloneCandidates := []deps.ContainerWithDeps{}
 	standaloneResultIndexes := map[string]int{}
+	selfUpdateCandidates := []selfUpdatePlan{}
+	selfUpdateResultIndexes := map[string]int{}
 
 	var results []types.ResourceResult
 	for _, candidate := range sorted {
@@ -178,7 +180,7 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 			projectName := utils.ComposeProjectLabel(labels)
 			serviceName := utils.ComposeServiceLabel(labels)
 			projectID := composeProjectIDInternal(projectName, composeGroups)
-			if projectID != "" && serviceName != "" && !s.config.LabelPolicy.IsSelfUpdateTarget(labels) {
+			if projectID != "" && serviceName != "" && !s.isSelfUpdateCandidateInternal(plan.cnt.ID, labels) {
 				if projectErr := projectResults[projectID]; projectErr != nil {
 					res.Status = types.StatusFailed
 					res.Error = fmt.Sprintf("project-level update failed: %v", projectErr)
@@ -207,15 +209,17 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 				return
 			}
 
-			if s.config.LabelPolicy.IsSelfUpdateTarget(labels) {
-				if err := s.triggerSelfUpdateInternal(ctx, plan.cnt.ID, candidate.Name, labels); err != nil {
-					res.Status = types.StatusFailed
-					res.Error = err.Error()
-					return
-				}
-				res.Status = types.StatusUpdated
-				res.UpdateAvailable = true
-				res.UpdateApplied = true
+			if s.isSelfUpdateCandidateInternal(plan.cnt.ID, labels) {
+				// Defer the actual trigger until every other container has
+				// been recreated: the self-updater may stop this process, so
+				// it must be the last action of the run.
+				selfUpdateResultIndexes[candidate.Name] = len(results)
+				selfUpdateCandidates = append(selfUpdateCandidates, selfUpdatePlan{
+					containerID: plan.cnt.ID,
+					name:        candidate.Name,
+					newRef:      plan.newRef,
+					labels:      labels,
+				})
 				return
 			}
 
@@ -238,7 +242,35 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 			}
 		}
 	}
+
+	// Trigger self-updates last; candidates arrive sorted agents-first so the
+	// server (which hosts this process) is the final one handled.
+	for _, target := range selfUpdateCandidates {
+		index, ok := selfUpdateResultIndexes[target.name]
+		if !ok {
+			continue
+		}
+		res := results[index]
+		endContainerStatus := s.BeginContainerUpdate(target.containerID)
+		if err := s.triggerSelfUpdateInternal(ctx, target.containerID, target.name, target.newRef, target.labels); err != nil {
+			res.Status = types.StatusFailed
+			res.Error = err.Error()
+		} else {
+			res.Status = types.StatusUpdated
+			res.UpdateAvailable = true
+			res.UpdateApplied = true
+		}
+		endContainerStatus()
+		results[index] = res
+	}
 	return results, nil
+}
+
+type selfUpdatePlan struct {
+	containerID string
+	name        string
+	newRef      string
+	labels      map[string]string
 }
 
 func (s *Service) updateStandaloneRestartCandidatesInternal(ctx context.Context, dcli *client.Client, candidates []deps.ContainerWithDeps, plansByName map[string]*restartPlan) []types.ResourceResult {

@@ -68,7 +68,7 @@ func (s *Service) UpdateContainer(ctx context.Context, containerID string, opts 
 		out.Skipped++
 		return out, nil
 	}
-	if s.config.LabelPolicy.IsSwarmTask(labels) && !s.config.LabelPolicy.IsSelfUpdateTarget(labels) {
+	if s.config.LabelPolicy.IsSwarmTask(labels) && !s.isSelfUpdateCandidateInternal(target.ID, labels) {
 		item := skippedContainerResultInternal(target.ID, name, "swarm service; update at the service level")
 		out.Items = append(out.Items, item)
 		out.Checked = 1
@@ -124,8 +124,8 @@ func (s *Service) UpdateContainer(ctx context.Context, containerID string, opts 
 		return out, nil
 	}
 
-	if s.config.LabelPolicy.IsSelfUpdateTarget(labels) {
-		if err := s.triggerSelfUpdateInternal(ctx, target.ID, name, labels); err != nil {
+	if s.isSelfUpdateCandidateInternal(target.ID, labels) {
+		if err := s.triggerSelfUpdateInternal(ctx, target.ID, name, normalizedRef, labels); err != nil {
 			item := failedContainerResultInternal(target.ID, name, err.Error())
 			out.Items = append(out.Items, item)
 			out.Failed++

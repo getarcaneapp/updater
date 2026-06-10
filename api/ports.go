@@ -85,5 +85,10 @@ type Config struct {
 	UsedImageCollector             UsedImageCollector
 	LabelPolicy                    types.LabelPolicy
 	AllowComposeStandaloneFallback bool
-	Logger                         *slog.Logger
+	// SelfContainerID is the ID (or ID prefix) of the container the host
+	// application itself runs in. When set, that container is always routed
+	// through the SelfUpdater even if its labels do not mark it as a
+	// self-update target.
+	SelfContainerID string
+	Logger          *slog.Logger
 }

@@ -4,11 +4,12 @@ import (
 	"context"
 	"errors"
 	"maps"
+	"strings"
 
 	"go.getarcane.app/updater/types"
 )
 
-func (s *Service) triggerSelfUpdateInternal(ctx context.Context, containerID, containerName string, labels map[string]string) error {
+func (s *Service) triggerSelfUpdateInternal(ctx context.Context, containerID, containerName, newImageRef string, labels map[string]string) error {
 	if s.config.SelfUpdater == nil {
 		return errors.New("self-update requires SelfUpdater")
 	}
@@ -16,12 +17,28 @@ func (s *Service) triggerSelfUpdateInternal(ctx context.Context, containerID, co
 	if s.config.LabelPolicy.IsAgent(labels) {
 		instanceType = "agent"
 	}
+	_ = s.recordEventInternal(ctx, "self_update_trigger", containerID, containerName, types.ResourceTypeContainer, map[string]any{
+		"instanceType": instanceType,
+		"newImage":     newImageRef,
+	})
 	return s.config.SelfUpdater.TriggerSelfUpdate(ctx, types.SelfUpdateTarget{
 		ContainerID:   containerID,
 		ContainerName: containerName,
 		InstanceType:  instanceType,
 		Labels:        maps.Clone(labels),
+		NewImageRef:   newImageRef,
 	})
+}
+
+// isSelfUpdateCandidateInternal reports whether a container must be handled by
+// the host SelfUpdater, either by label policy or because it is the container
+// the host application itself runs in.
+func (s *Service) isSelfUpdateCandidateInternal(containerID string, labels map[string]string) bool {
+	if s.config.LabelPolicy.IsSelfUpdateTarget(labels) {
+		return true
+	}
+	selfID := strings.TrimSpace(s.config.SelfContainerID)
+	return selfID != "" && (strings.HasPrefix(containerID, selfID) || strings.HasPrefix(selfID, containerID))
 }
 
 func (s *Service) recordResultInternal(ctx context.Context, result types.ResourceResult) error {

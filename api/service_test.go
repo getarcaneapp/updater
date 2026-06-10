@@ -93,6 +93,17 @@ func (f *fakeSelfUpdater) TriggerSelfUpdate(ctx context.Context, target types.Se
 	return nil
 }
 
+type recordingSelfUpdater struct {
+	operations *[]string
+	targets    []types.SelfUpdateTarget
+}
+
+func (r *recordingSelfUpdater) TriggerSelfUpdate(ctx context.Context, target types.SelfUpdateTarget) error {
+	*r.operations = append(*r.operations, "selfupdate:"+target.ContainerID)
+	r.targets = append(r.targets, target)
+	return nil
+}
+
 func newDockerClientForHandlerInternal(t *testing.T, handler http.HandlerFunc) *client.Client {
 	t.Helper()
 
@@ -510,6 +521,9 @@ func TestRestartContainersUsingOldImagesRoutesLegacyArcaneServerThroughSelfUpdat
 	if selfUpdater.targets[0].ContainerID != "arcane-id" || selfUpdater.targets[0].InstanceType != "server" {
 		t.Fatalf("self-update target = %#v, want arcane server", selfUpdater.targets[0])
 	}
+	if selfUpdater.targets[0].NewImageRef != "ghcr.io/getarcaneapp/arcane:2" {
+		t.Fatalf("self-update target NewImageRef = %q, want resolved new image ref", selfUpdater.targets[0].NewImageRef)
+	}
 	if len(projectUpdater.updateCalls) != 0 {
 		t.Fatalf("project updater calls = %#v, want none", projectUpdater.updateCalls)
 	}
@@ -518,6 +532,89 @@ func TestRestartContainersUsingOldImagesRoutesLegacyArcaneServerThroughSelfUpdat
 	}
 	if len(results) != 1 || results[0].Status != types.StatusUpdated {
 		t.Fatalf("results = %#v, want one updated result", results)
+	}
+}
+
+func TestRestartContainersUsingOldImagesSelfContainerIDFiresAfterStandaloneInternal(t *testing.T) {
+	operations := []string{}
+	selfUpdater := &recordingSelfUpdater{operations: &operations}
+
+	dcli := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		path := dockerAPIPathInternal(r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && path == "/containers/json":
+			writeDockerJSONInternal(t, w, []container.Summary{
+				{ID: "app-id", Names: []string{"/app"}, Image: "app:1", ImageID: "sha256:old-app", State: "running"},
+				{ID: "self-id", Names: []string{"/arcane"}, Image: "ghcr.io/getarcaneapp/arcane:1", ImageID: "sha256:old-arcane", State: "running"},
+			})
+		case r.Method == http.MethodGet && path == "/containers/app-id/json":
+			writeDockerJSONInternal(t, w, container.InspectResponse{
+				ID:     "app-id",
+				Name:   "/app",
+				Image:  "sha256:old-app",
+				Config: &container.Config{Image: "app:1"},
+			})
+		case r.Method == http.MethodGet && path == "/containers/self-id/json":
+			writeDockerJSONInternal(t, w, container.InspectResponse{
+				ID:     "self-id",
+				Name:   "/arcane",
+				Image:  "sha256:old-arcane",
+				Config: &container.Config{Image: "ghcr.io/getarcaneapp/arcane:1"},
+			})
+		case r.Method == http.MethodGet && path == "/images/app:2/json":
+			writeDockerJSONInternal(t, w, image.InspectResponse{ID: "sha256:new-app"})
+		case r.Method == http.MethodGet && path == "/images/ghcr.io/getarcaneapp/arcane:2/json":
+			writeDockerJSONInternal(t, w, image.InspectResponse{ID: "sha256:new-arcane"})
+		case r.Method == http.MethodPost && strings.HasPrefix(path, "/containers/") && strings.HasSuffix(path, "/stop"):
+			id := strings.TrimSuffix(strings.TrimPrefix(path, "/containers/"), "/stop")
+			operations = append(operations, "stop:"+id)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete && strings.HasPrefix(path, "/containers/"):
+			id := strings.TrimPrefix(path, "/containers/")
+			operations = append(operations, "remove:"+id)
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && path == "/containers/create":
+			operations = append(operations, "create:"+r.URL.Query().Get("name"))
+			writeDockerJSONInternal(t, w, map[string]any{"Id": "new-app-id", "Warnings": []string{}})
+		case r.Method == http.MethodPost && strings.HasPrefix(path, "/containers/") && strings.HasSuffix(path, "/start"):
+			id := strings.TrimSuffix(strings.TrimPrefix(path, "/containers/"), "/start")
+			operations = append(operations, "start:"+id)
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	service := newServiceInternal(Config{
+		DockerClientProvider: fakeDockerClientProvider{client: dcli},
+		SelfUpdater:          selfUpdater,
+		SelfContainerID:      "self-id",
+		LabelPolicy:          labels.DefaultLabelPolicy(),
+	})
+
+	results, err := service.RestartContainersUsingOldImages(context.Background(), map[string]string{
+		"sha256:old-app":    "app:2",
+		"sha256:old-arcane": "ghcr.io/getarcaneapp/arcane:2",
+	}, nil)
+	if err != nil {
+		t.Fatalf("RestartContainersUsingOldImages() error = %v", err)
+	}
+
+	// The unlabeled self container must route through the SelfUpdater (by
+	// container ID) and only after every standalone recreate has finished.
+	assertOperationsInOrderInternal(t, operations, []string{
+		"stop:app-id",
+		"start:new-app-id",
+		"selfupdate:self-id",
+	})
+	if len(selfUpdater.targets) != 1 || selfUpdater.targets[0].NewImageRef != "ghcr.io/getarcaneapp/arcane:2" {
+		t.Fatalf("self-update targets = %#v, want one with the new image ref", selfUpdater.targets)
+	}
+	statusByName := map[string]string{}
+	for _, result := range results {
+		statusByName[result.ResourceName] = result.Status
+	}
+	if statusByName["app"] != types.StatusUpdated || statusByName["arcane"] != types.StatusUpdated {
+		t.Fatalf("results = %#v, want app and arcane updated", results)
 	}
 }
 
