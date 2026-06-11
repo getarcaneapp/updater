@@ -669,9 +669,13 @@ func TestResolvePullableImageRefInternal(t *testing.T) {
 	}
 }
 
-func TestServiceRejectsComposeFallbackByDefaultInternal(t *testing.T) {
-	service := NewService(Config{})
-	err := service.UpdateStandaloneContainer(context.Background(), container.Summary{
+func TestServiceFallsBackToStandaloneWhenComposeProjectUnresolvedInternal(t *testing.T) {
+	projectUpdater := &fakeProjectUpdater{projects: map[string]types.ComposeProject{}}
+	service := NewService(Config{
+		DockerClientProvider: fakeDockerClientProvider{err: errors.New("no docker in test")},
+		ProjectUpdater:       projectUpdater,
+	})
+	err := service.updateComposeOrStandaloneInternal(context.Background(), container.Summary{
 		ID: "container-1",
 	}, container.InspectResponse{
 		Config: &container.Config{Labels: map[string]string{
@@ -679,7 +683,12 @@ func TestServiceRejectsComposeFallbackByDefaultInternal(t *testing.T) {
 			"com.docker.compose.service": "web",
 		}},
 	}, "nginx:latest")
-	if err == nil {
-		t.Fatal("UpdateStandaloneContainer() error = nil for compose container without fallback")
+	// The unresolved project must route to the standalone path, which is the
+	// first caller of the (failing) docker client in this setup.
+	if err == nil || !strings.Contains(err.Error(), "docker connect") {
+		t.Fatalf("updateComposeOrStandaloneInternal() error = %v, want standalone-path docker connect error", err)
+	}
+	if len(projectUpdater.updateCalls) != 0 {
+		t.Fatalf("UpdateServices called %v times for unresolved project, want 0", len(projectUpdater.updateCalls))
 	}
 }

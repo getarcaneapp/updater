@@ -72,19 +72,18 @@ func (f UsedImageCollectorFunc) UsedImages(ctx context.Context) (map[string]stru
 
 // Config configures Service.
 type Config struct {
-	DockerClientProvider           DockerClientProvider
-	ImagePuller                    ImagePuller
-	PendingStore                   PendingStore
-	RunRecorder                    RunRecorder
-	Settings                       SettingsProvider
-	RegistryDigestResolver         digest.RemoteResolver
-	ProjectUpdater                 ProjectUpdater
-	SelfUpdater                    SelfUpdater
-	Notifier                       Notifier
-	EventRecorder                  EventRecorder
-	UsedImageCollector             UsedImageCollector
-	LabelPolicy                    types.LabelPolicy
-	AllowComposeStandaloneFallback bool
+	DockerClientProvider   DockerClientProvider
+	ImagePuller            ImagePuller
+	PendingStore           PendingStore
+	RunRecorder            RunRecorder
+	Settings               SettingsProvider
+	RegistryDigestResolver digest.RemoteResolver
+	ProjectUpdater         ProjectUpdater
+	SelfUpdater            SelfUpdater
+	Notifier               Notifier
+	EventRecorder          EventRecorder
+	UsedImageCollector     UsedImageCollector
+	LabelPolicy            types.LabelPolicy
 	// SelfContainerID is the ID (or ID prefix) of the container the host
 	// application itself runs in. When set, that container is always routed
 	// through the SelfUpdater even if its labels do not mark it as a

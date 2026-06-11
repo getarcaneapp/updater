@@ -172,9 +172,6 @@ func (s *Service) UpdateStandaloneContainer(ctx context.Context, cnt container.S
 }
 
 func (s *Service) validateStandaloneContainerUpdateInternal(labels map[string]string) error {
-	if utils.ComposeProjectLabel(labels) != "" && utils.ComposeServiceLabel(labels) != "" && !s.config.AllowComposeStandaloneFallback {
-		return errors.New("compose container update requires ProjectUpdater unless standalone fallback is enabled")
-	}
 	if s.config.LabelPolicy.IsSelfUpdateTarget(labels) {
 		return errors.New("self-update containers must use SelfUpdater")
 	}
@@ -284,21 +281,20 @@ func (s *Service) updateComposeOrStandaloneInternal(ctx context.Context, target 
 	labels := labelsFromInspectInternal(inspect)
 	projectName := utils.ComposeProjectLabel(labels)
 	serviceName := utils.ComposeServiceLabel(labels)
-	if projectName != "" && serviceName != "" {
-		if s.config.ProjectUpdater == nil {
-			if !s.config.AllowComposeStandaloneFallback {
-				return errors.New("compose container update requires ProjectUpdater unless standalone fallback is enabled")
-			}
-		} else {
-			project, err := s.config.ProjectUpdater.ProjectByComposeName(ctx, projectName)
-			if err != nil {
-				if !s.config.AllowComposeStandaloneFallback {
-					return fmt.Errorf("resolve compose project: %w", err)
-				}
-			} else {
-				return s.config.ProjectUpdater.UpdateServices(ctx, project.ID, []string{serviceName})
-			}
+	if projectName != "" && serviceName != "" && s.config.ProjectUpdater != nil {
+		project, err := s.config.ProjectUpdater.ProjectByComposeName(ctx, projectName)
+		if err == nil {
+			// The compose path was chosen; a failure here must surface instead
+			// of falling back, so a partial compose up is never clobbered by a
+			// standalone recreate.
+			return s.config.ProjectUpdater.UpdateServices(ctx, project.ID, []string{serviceName})
 		}
+		s.logger.WarnContext(ctx, "compose project not resolved; falling back to standalone container update",
+			"container", utils.ContainerSummaryName(target),
+			"project", projectName,
+			"service", serviceName,
+			"error", err,
+		)
 	}
 	return s.UpdateStandaloneContainer(ctx, target, inspect, normalizedRef)
 }
