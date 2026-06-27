@@ -4,9 +4,9 @@ go 1.26.4
 
 require (
 	github.com/distribution/reference v0.6.0
-	github.com/docker/cli v29.5.3+incompatible
-	github.com/moby/moby/api v1.54.2
-	github.com/moby/moby/client v0.4.1
+	github.com/docker/cli v29.6.1+incompatible
+	github.com/moby/moby/api v1.55.0
+	github.com/moby/moby/client v0.5.0
 	github.com/opencontainers/go-digest v1.0.0
 )
 
