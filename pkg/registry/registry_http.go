@@ -362,7 +362,7 @@ func parseRateLimitHeaderInternal(value string) (*int, *int) {
 	}
 
 	var window *int
-	for _, part := range strings.Split(rest, ";") {
+	for part := range strings.SplitSeq(rest, ";") {
 		key, rawValue, ok := strings.Cut(strings.TrimSpace(part), "=")
 		if !ok || strings.ToLower(key) != "w" {
 			continue

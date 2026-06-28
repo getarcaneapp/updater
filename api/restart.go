@@ -151,8 +151,7 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 				results = append(results, failedContainerResultInternal(plan.cnt.ID, candidate.Name, fmt.Sprintf("inspect failed: %v", inspectErr)))
 				continue
 			}
-			inspect := inspectResult.Container
-			plan.inspect = &inspect
+			plan.inspect = new(inspectResult.Container)
 		}
 
 		res := types.ResourceResult{
