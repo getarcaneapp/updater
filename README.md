@@ -32,7 +32,7 @@ The updater does not own scheduling, durable persistence, user notifications, or
 ## Getting started
 
 ```sh
-go get go/getarcane.app/updater@latest
+go get go.getarcane.app/updater@latest
 ```
 
 ```go
