@@ -19,7 +19,7 @@ type RemoteResolver interface {
 
 // Checker compares local image digests with remote digests.
 type Checker struct {
-	dcli           *client.Client
+	dockerClient   *client.Client
 	digestResolver RemoteResolver
 }
 
@@ -33,8 +33,8 @@ type CheckResult struct {
 }
 
 // NewChecker creates a digest checker.
-func NewChecker(dcli *client.Client, digestResolver RemoteResolver) *Checker {
-	return &Checker{dcli: dcli, digestResolver: digestResolver}
+func NewChecker(dockerClient *client.Client, digestResolver RemoteResolver) *Checker {
+	return &Checker{dockerClient: dockerClient, digestResolver: digestResolver}
 }
 
 // Normalize parses and canonicalizes an OCI digest.
@@ -67,7 +67,7 @@ func (c *Checker) CheckImageNeedsUpdate(ctx context.Context, imageRef string) Ch
 		result.RemoteDigest = pinnedDigest
 		return result
 	}
-	if c == nil || c.dcli == nil {
+	if c == nil || c.dockerClient == nil {
 		result.Error = errors.New("docker client unavailable")
 		return result
 	}
@@ -101,10 +101,10 @@ func (c *Checker) CheckImageNeedsUpdate(ctx context.Context, imageRef string) Ch
 
 // CompareWithPulled compares the current container image ID with a freshly pulled image.
 func (c *Checker) CompareWithPulled(ctx context.Context, containerImageID string, newImageRef string) (bool, error) {
-	if c == nil || c.dcli == nil {
+	if c == nil || c.dockerClient == nil {
 		return false, errors.New("docker client unavailable")
 	}
-	newInspect, err := c.dcli.ImageInspect(ctx, newImageRef)
+	newInspect, err := c.dockerClient.ImageInspect(ctx, newImageRef)
 	if err != nil {
 		return false, fmt.Errorf("inspect new image: %w", err)
 	}
@@ -113,16 +113,16 @@ func (c *Checker) CompareWithPulled(ctx context.Context, containerImageID string
 
 // GetImageIDsForRef returns local image IDs associated with a reference.
 func (c *Checker) GetImageIDsForRef(ctx context.Context, ref string) ([]string, error) {
-	if c == nil || c.dcli == nil {
+	if c == nil || c.dockerClient == nil {
 		return nil, errors.New("docker client unavailable")
 	}
 
-	inspect, err := c.dcli.ImageInspect(ctx, ref)
+	inspect, err := c.dockerClient.ImageInspect(ctx, ref)
 	if err == nil && strings.TrimSpace(inspect.ID) != "" {
 		return []string{inspect.ID}, nil
 	}
 
-	imageList, err := c.dcli.ImageList(ctx, client.ImageListOptions{})
+	imageList, err := c.dockerClient.ImageList(ctx, client.ImageListOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -141,7 +141,7 @@ func (c *Checker) GetImageIDsForRef(ctx context.Context, ref string) ([]string, 
 }
 
 func (c *Checker) getLocalDigestInternal(ctx context.Context, imageRef string) (string, error) {
-	inspect, err := c.dcli.ImageInspect(ctx, imageRef)
+	inspect, err := c.dockerClient.ImageInspect(ctx, imageRef)
 	if err != nil {
 		return "", fmt.Errorf("image not found locally: %w", err)
 	}

@@ -77,11 +77,11 @@ func CurrentContainerImageID(c container.Summary, inspect *container.InspectResp
 }
 
 // VerifyComposeServiceUpdatedImage verifies that a compose service no longer runs oldImageID.
-func VerifyComposeServiceUpdatedImage(ctx context.Context, dcli *client.Client, projectName, serviceName, oldImageID string) error {
+func VerifyComposeServiceUpdatedImage(ctx context.Context, dockerClient *client.Client, projectName, serviceName, oldImageID string) error {
 	projectName = strings.TrimSpace(projectName)
 	serviceName = strings.TrimSpace(serviceName)
 	oldImageID = strings.TrimSpace(oldImageID)
-	if dcli == nil || projectName == "" || serviceName == "" || oldImageID == "" {
+	if dockerClient == nil || projectName == "" || serviceName == "" || oldImageID == "" {
 		return nil
 	}
 
@@ -89,7 +89,7 @@ func VerifyComposeServiceUpdatedImage(ctx context.Context, dcli *client.Client, 
 	filters = filters.Add("label", utils.ComposeProjectLabelKey+"="+projectName)
 	filters = filters.Add("label", utils.ComposeServiceLabelKey+"="+serviceName)
 
-	listResult, err := dcli.ContainerList(ctx, client.ContainerListOptions{All: false, Filters: filters})
+	listResult, err := dockerClient.ContainerList(ctx, client.ContainerListOptions{All: false, Filters: filters})
 	if err != nil {
 		return fmt.Errorf("verify compose service image: list containers: %w", err)
 	}
@@ -100,7 +100,7 @@ func VerifyComposeServiceUpdatedImage(ctx context.Context, dcli *client.Client, 
 	for _, c := range listResult.Items {
 		currentImageID := strings.TrimSpace(c.ImageID)
 		if currentImageID == "" {
-			inspectResult, inspectErr := utils.ContainerInspectWithCompatibility(ctx, dcli, c.ID, client.ContainerInspectOptions{})
+			inspectResult, inspectErr := utils.ContainerInspectWithCompatibility(ctx, dockerClient, c.ID, client.ContainerInspectOptions{})
 			if inspectErr != nil {
 				return fmt.Errorf("verify compose service image: inspect container %s: %w", c.ID, inspectErr)
 			}

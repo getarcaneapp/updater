@@ -83,11 +83,11 @@ func restartCandidateLabelsInternal(candidate deps.ContainerWithDeps, plan *rest
 	return labels
 }
 
-func dockerHostInternal(dcli *client.Client) string {
-	if dcli == nil {
+func dockerHostInternal(dockerClient *client.Client) string {
+	if dockerClient == nil {
 		return ""
 	}
-	return dcli.DaemonHost()
+	return dockerClient.DaemonHost()
 }
 
 func dockerProxyContainerNameInternal(dockerHost string) string {

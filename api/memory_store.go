@@ -23,6 +23,11 @@ func NewMemoryPendingStore(records ...types.ImageUpdateRecord) PendingStore {
 }
 
 func (s *memoryPendingStore) PendingImageUpdates(ctx context.Context) ([]types.ImageUpdateRecord, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -40,6 +45,11 @@ func (s *memoryPendingStore) PendingImageUpdates(ctx context.Context) ([]types.I
 }
 
 func (s *memoryPendingStore) ClearImageUpdateRecord(ctx context.Context, record types.ImageUpdateRecord) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

@@ -25,6 +25,11 @@ type fakeDockerClientProvider struct {
 }
 
 func (f fakeDockerClientProvider) DockerClient(ctx context.Context) (*client.Client, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	return f.client, f.err
 }
 
@@ -34,10 +39,20 @@ type fakePendingStore struct {
 }
 
 func (f *fakePendingStore) PendingImageUpdates(ctx context.Context) ([]types.ImageUpdateRecord, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
 	return f.records, nil
 }
 
 func (f *fakePendingStore) ClearImageUpdateRecord(ctx context.Context, record types.ImageUpdateRecord) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	f.cleared = append(f.cleared, record.ID)
 	return nil
 }
@@ -47,6 +62,11 @@ type fakeRunRecorder struct {
 }
 
 func (f *fakeRunRecorder) RecordUpdateRun(ctx context.Context, result types.ResourceResult) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	f.results = append(f.results, result)
 	return nil
 }
@@ -57,14 +77,32 @@ type fakePuller struct {
 }
 
 func (f *fakePuller) PullImage(ctx context.Context, imageRef string, progress io.Writer) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	f.pulled = append(f.pulled, imageRef)
+	if progress != nil {
+		if _, err := io.WriteString(progress, imageRef); err != nil {
+			return err
+		}
+	}
 	return f.err
 }
 
 type fakeDigestResolver struct{}
 
 func (fakeDigestResolver) GetImageDigest(ctx context.Context, imageRef string) (string, error) {
-	return "", nil
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+	}
+	if strings.TrimSpace(imageRef) == "" {
+		return "", errors.New("image ref is required")
+	}
+	return digest.FromString(imageRef).String(), nil
 }
 
 type fakeProjectUpdater struct {
@@ -73,6 +111,11 @@ type fakeProjectUpdater struct {
 }
 
 func (f *fakeProjectUpdater) ProjectByComposeName(ctx context.Context, composeName string) (types.ComposeProject, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return types.ComposeProject{}, err
+		}
+	}
 	if project, ok := f.projects[composeName]; ok {
 		return project, nil
 	}
@@ -80,6 +123,11 @@ func (f *fakeProjectUpdater) ProjectByComposeName(ctx context.Context, composeNa
 }
 
 func (f *fakeProjectUpdater) UpdateServices(ctx context.Context, projectID string, services []string) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	f.updateCalls = append(f.updateCalls, projectID+":"+strings.Join(services, ","))
 	return nil
 }
@@ -89,6 +137,11 @@ type fakeSelfUpdater struct {
 }
 
 func (f *fakeSelfUpdater) TriggerSelfUpdate(ctx context.Context, target types.SelfUpdateTarget) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	f.targets = append(f.targets, target)
 	return nil
 }
@@ -99,7 +152,12 @@ type recordingSelfUpdater struct {
 }
 
 func (r *recordingSelfUpdater) TriggerSelfUpdate(ctx context.Context, target types.SelfUpdateTarget) error {
-	*r.operations = append(*r.operations, "selfupdate:"+target.ContainerID)
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	*r.operations = append(*r.operations, "self-update:"+target.ContainerID)
 	r.targets = append(r.targets, target)
 	return nil
 }
@@ -110,11 +168,11 @@ func newDockerClientForHandlerInternal(t *testing.T, handler http.HandlerFunc) *
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 
-	dcli, err := client.New(client.WithHost(server.URL), client.WithAPIVersion("1.41"))
+	dockerClient, err := client.New(client.WithHost(server.URL), client.WithAPIVersion("1.41"))
 	if err != nil {
 		t.Fatalf("new docker client: %v", err)
 	}
-	return dcli
+	return dockerClient
 }
 
 func dockerAPIPathInternal(path string) string {
@@ -136,7 +194,7 @@ func writeDockerJSONInternal(t *testing.T, w http.ResponseWriter, value any) {
 }
 
 func TestNewServiceAppliesGenericDockerDefaultsInternal(t *testing.T) {
-	service := NewService(Config{})
+	service := NewDefaultService()
 	if _, ok := service.config.DockerClientProvider.(defaultDockerClientProvider); !ok {
 		t.Fatalf("DockerClientProvider = %T, want built-in provider", service.config.DockerClientProvider)
 	}
@@ -177,7 +235,7 @@ func TestNewServiceKeepsCustomDockerAdaptersInternal(t *testing.T) {
 	}
 }
 
-func TestApplyPendingDefaultStoreNoopsInternal(t *testing.T) {
+func TestApplyPendingDefaultStoreNoOperationsInternal(t *testing.T) {
 	service := NewService(Config{})
 
 	got, err := service.ApplyPending(context.Background(), types.Options{})
@@ -212,6 +270,27 @@ func TestMemoryPendingStoreReadsAndClearsRecordsInternal(t *testing.T) {
 	}
 	if len(records) != 1 || records[0].ID != "b" {
 		t.Fatalf("PendingImageUpdates() after clear = %#v, want only b", records)
+	}
+}
+
+func TestMemoryPendingStoreRespectsCanceledContextInternal(t *testing.T) {
+	store := NewMemoryPendingStore(types.ImageUpdateRecord{ID: "a", Repository: "repo", Tag: "1"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := store.PendingImageUpdates(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("PendingImageUpdates() error = %v, want context canceled", err)
+	}
+	if err := store.ClearImageUpdateRecord(ctx, types.ImageUpdateRecord{ID: "a"}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ClearImageUpdateRecord() error = %v, want context canceled", err)
+	}
+
+	records, err := store.PendingImageUpdates(context.Background())
+	if err != nil {
+		t.Fatalf("PendingImageUpdates() after canceled clear error = %v", err)
+	}
+	if len(records) != 1 || records[0].ID != "a" {
+		t.Fatalf("PendingImageUpdates() after canceled clear = %#v, want record a", records)
 	}
 }
 
@@ -286,7 +365,7 @@ func TestApplyPendingSkipsUnchangedPulledImageInternal(t *testing.T) {
 		UpdateType: types.UpdateTypeDigest,
 	}}}
 	puller := &fakePuller{}
-	dcli := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
 		switch dockerAPIPathInternal(r.URL.Path) {
 		case "/images/nginx:1.27/json":
 			writeDockerJSONInternal(t, w, image.InspectResponse{
@@ -298,7 +377,7 @@ func TestApplyPendingSkipsUnchangedPulledImageInternal(t *testing.T) {
 		}
 	})
 	service := newServiceInternal(Config{
-		DockerClientProvider: fakeDockerClientProvider{client: dcli},
+		DockerClientProvider: fakeDockerClientProvider{client: dockerClient},
 		PendingStore:         store,
 		ImagePuller:          puller,
 		UsedImageCollector: UsedImageCollectorFunc(func(context.Context) (map[string]struct{}, error) {
@@ -333,7 +412,7 @@ func TestApplyPendingForceBypassesUnchangedPulledImageSkipInternal(t *testing.T)
 		UpdateType: types.UpdateTypeDigest,
 	}}}
 	puller := &fakePuller{}
-	dcli := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
 		switch dockerAPIPathInternal(r.URL.Path) {
 		case "/images/nginx:1.27/json":
 			writeDockerJSONInternal(t, w, image.InspectResponse{
@@ -347,7 +426,7 @@ func TestApplyPendingForceBypassesUnchangedPulledImageSkipInternal(t *testing.T)
 		}
 	})
 	service := newServiceInternal(Config{
-		DockerClientProvider: fakeDockerClientProvider{client: dcli},
+		DockerClientProvider: fakeDockerClientProvider{client: dockerClient},
 		PendingStore:         store,
 		ImagePuller:          puller,
 		UsedImageCollector: UsedImageCollectorFunc(func(context.Context) (map[string]struct{}, error) {
@@ -371,10 +450,10 @@ func TestApplyPendingForceBypassesUnchangedPulledImageSkipInternal(t *testing.T)
 }
 
 func TestRestartContainersUsingOldImagesRestartsDependenciesInWatchtowerOrderInternal(t *testing.T) {
-	operations := []string{}
+	var operations []string
 	createIDs := map[string]string{"db": "new-db-id", "web": "new-web-id"}
 
-	dcli := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
 		path := dockerAPIPathInternal(r.URL.Path)
 		switch {
 		case r.Method == http.MethodGet && path == "/containers/json":
@@ -426,7 +505,7 @@ func TestRestartContainersUsingOldImagesRestartsDependenciesInWatchtowerOrderInt
 		}
 	})
 	service := newServiceInternal(Config{
-		DockerClientProvider: fakeDockerClientProvider{client: dcli},
+		DockerClientProvider: fakeDockerClientProvider{client: dockerClient},
 	})
 
 	results, err := service.RestartContainersUsingOldImages(context.Background(), map[string]string{"sha256:old-db": "db:2"}, nil)
@@ -458,9 +537,9 @@ func TestRestartContainersUsingOldImagesRoutesLegacyArcaneServerThroughSelfUpdat
 		},
 	}
 	selfUpdater := &fakeSelfUpdater{}
-	operations := []string{}
+	var operations []string
 
-	dcli := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
 		path := dockerAPIPathInternal(r.URL.Path)
 		switch {
 		case r.Method == http.MethodGet && path == "/containers/json":
@@ -505,7 +584,7 @@ func TestRestartContainersUsingOldImagesRoutesLegacyArcaneServerThroughSelfUpdat
 		}
 	})
 	service := newServiceInternal(Config{
-		DockerClientProvider: fakeDockerClientProvider{client: dcli},
+		DockerClientProvider: fakeDockerClientProvider{client: dockerClient},
 		ProjectUpdater:       projectUpdater,
 		SelfUpdater:          selfUpdater,
 		LabelPolicy:          labels.DefaultLabelPolicy(),
@@ -536,10 +615,10 @@ func TestRestartContainersUsingOldImagesRoutesLegacyArcaneServerThroughSelfUpdat
 }
 
 func TestRestartContainersUsingOldImagesSelfContainerIDFiresAfterStandaloneInternal(t *testing.T) {
-	operations := []string{}
+	var operations []string
 	selfUpdater := &recordingSelfUpdater{operations: &operations}
 
-	dcli := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
 		path := dockerAPIPathInternal(r.URL.Path)
 		switch {
 		case r.Method == http.MethodGet && path == "/containers/json":
@@ -585,7 +664,7 @@ func TestRestartContainersUsingOldImagesSelfContainerIDFiresAfterStandaloneInter
 		}
 	})
 	service := newServiceInternal(Config{
-		DockerClientProvider: fakeDockerClientProvider{client: dcli},
+		DockerClientProvider: fakeDockerClientProvider{client: dockerClient},
 		SelfUpdater:          selfUpdater,
 		SelfContainerID:      "self-id",
 		LabelPolicy:          labels.DefaultLabelPolicy(),
@@ -604,7 +683,7 @@ func TestRestartContainersUsingOldImagesSelfContainerIDFiresAfterStandaloneInter
 	assertOperationsInOrderInternal(t, operations, []string{
 		"stop:app-id",
 		"start:new-app-id",
-		"selfupdate:self-id",
+		"self-update:self-id",
 	})
 	if len(selfUpdater.targets) != 1 || selfUpdater.targets[0].NewImageRef != "ghcr.io/getarcaneapp/arcane:2" {
 		t.Fatalf("self-update targets = %#v, want one with the new image ref", selfUpdater.targets)
@@ -662,7 +741,7 @@ func TestResolvePullableImageRefInternal(t *testing.T) {
 		t.Fatalf("ResolvePullableImageRef() fallback = %q/%q, want repo tag", ref, source)
 	}
 
-	pinnedRef := "nginx@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	pinnedRef := "nginx@sha256:1111111111111111111111111111111111111111111111111111111111111111"
 	ref, source = ResolvePullableImageRef("sha256:abc", pinnedRef, []string{pinnedRef})
 	if ref != "" || source != "" {
 		t.Fatalf("ResolvePullableImageRef() digest-pinned fallback = %q/%q, want empty", ref, source)

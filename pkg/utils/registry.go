@@ -3,6 +3,7 @@ package utils
 
 import (
 	"fmt"
+	"net/url"
 	"sort"
 	"strings"
 
@@ -43,18 +44,14 @@ func ExtractRegistryHost(imageRef string) string {
 
 // NormalizeRegistryForComparison canonicalizes registry hosts for equality checks.
 func NormalizeRegistryForComparison(rawURL string) string {
-	rawURL = strings.TrimSpace(strings.ToLower(rawURL))
-	rawURL = strings.TrimPrefix(rawURL, "https://")
-	rawURL = strings.TrimPrefix(rawURL, "http://")
-	rawURL = strings.TrimSuffix(rawURL, "/")
-
-	if slash := strings.Index(rawURL, "/"); slash != -1 {
-		rawURL = rawURL[:slash]
+	registryHost := strings.ToLower(stripRegistrySchemeInternal(rawURL))
+	if slash := strings.Index(registryHost, "/"); slash != -1 {
+		registryHost = registryHost[:slash]
 	}
-	if rawURL == "docker.io" || rawURL == "registry-1.docker.io" || rawURL == "index.docker.io" {
+	if registryHost == "docker.io" || registryHost == "registry-1.docker.io" || registryHost == "index.docker.io" {
 		return "docker.io"
 	}
-	return rawURL
+	return registryHost
 }
 
 // NormalizeRegistryURL canonicalizes registry URLs for Docker auth config lookups.
@@ -64,10 +61,7 @@ func NormalizeRegistryURL(rawURL string) string {
 		return "https://index.docker.io/v1/"
 	}
 
-	result := strings.TrimSpace(rawURL)
-	result = strings.TrimPrefix(result, "https://")
-	result = strings.TrimPrefix(result, "http://")
-	return strings.TrimSuffix(result, "/")
+	return stripRegistrySchemeInternal(rawURL)
 }
 
 // IsRegistryMatch reports whether two registry host values describe the same registry.
@@ -83,4 +77,21 @@ func SortRegistryKeys(values map[string]string) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func stripRegistrySchemeInternal(rawURL string) string {
+	rawURL = strings.TrimSpace(rawURL)
+	parsed, err := url.Parse(rawURL)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+		return strings.TrimSuffix(rawURL, "/")
+	}
+
+	result := parsed.Host
+	if path := parsed.EscapedPath(); path != "" {
+		result += path
+	}
+	if parsed.RawQuery != "" {
+		result += "?" + parsed.RawQuery
+	}
+	return strings.TrimSuffix(result, "/")
 }

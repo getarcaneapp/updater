@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"github.com/moby/moby/client"
 	"go.getarcane.app/updater/pkg/digest"
@@ -18,13 +17,8 @@ import (
 
 // ApplyPending applies pending image updates from the configured PendingStore.
 func (s *Service) ApplyPending(ctx context.Context, opts types.Options) (out *types.Result, err error) {
-	start := time.Now()
-	out = &types.Result{Items: []types.ResourceResult{}, StartTime: start.UTC().Format(time.RFC3339)}
-	defer func() {
-		out.EndTime = time.Now().UTC().Format(time.RFC3339)
-		out.Duration = time.Since(start).String()
-		out.Success = err == nil && out.Failed == 0
-	}()
+	out, finish := newTimedResultInternal()
+	defer finish(&err)
 
 	if s.config.PendingStore == nil {
 		return nil, errors.New("pending store is required")
@@ -51,14 +45,14 @@ func (s *Service) ApplyPending(ctx context.Context, opts types.Options) (out *ty
 		return out, nil
 	}
 
-	var dcli *client.Client
+	var dockerClient *client.Client
 	if !opts.DryRun || s.config.RegistryDigestResolver != nil {
-		dcli, err = s.dockerClientInternal(ctx)
+		dockerClient, err = s.dockerClientInternal(ctx)
 		if err != nil && !opts.DryRun {
 			return nil, fmt.Errorf("docker connect: %w", err)
 		}
 	}
-	digestChecker := digest.NewChecker(dcli, s.config.RegistryDigestResolver)
+	digestChecker := digest.NewChecker(dockerClient, s.config.RegistryDigestResolver)
 	oldIDToNewRef := map[string]string{}
 	oldRefToNewRef := map[string]string{}
 
@@ -160,14 +154,14 @@ func (s *Service) dockerClientInternal(ctx context.Context) (*client.Client, err
 	if s.config.DockerClientProvider == nil {
 		return nil, errors.New("docker client provider is required")
 	}
-	dcli, err := s.config.DockerClientProvider.DockerClient(ctx)
+	dockerClient, err := s.config.DockerClientProvider.DockerClient(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if dcli == nil {
+	if dockerClient == nil {
 		return nil, errors.New("docker client unavailable")
 	}
-	return dcli, nil
+	return dockerClient, nil
 }
 
 func (s *Service) buildUpdatePlansInternal(ctx context.Context, records []types.ImageUpdateRecord, usedImages map[string]struct{}) []updatePlan {
@@ -190,9 +184,9 @@ func (s *Service) buildUpdatePlansInternal(ctx context.Context, records []types.
 		}
 
 		newRef := record.NewImageRef()
-		oldIDs := []string{}
-		if dcli, err := s.dockerClientInternal(ctx); err == nil {
-			oldIDs, _ = digest.NewChecker(dcli, nil).GetImageIDsForRef(ctx, oldRef)
+		var oldIDs []string
+		if dockerClient, err := s.dockerClientInternal(ctx); err == nil {
+			oldIDs, _ = digest.NewChecker(dockerClient, nil).GetImageIDsForRef(ctx, oldRef)
 		}
 		oldIDs = match.AppendImageUpdateRecordIDToOldIDs(oldIDs, record.ID)
 		plans = append(plans, updatePlan{record: record, oldRef: oldRef, newRef: newRef, oldIDs: oldIDs})
@@ -223,7 +217,7 @@ func (s *Service) usedImagesInternal(ctx context.Context) (map[string]struct{}, 
 	if s.config.UsedImageCollector != nil {
 		return s.config.UsedImageCollector.UsedImages(ctx)
 	}
-	dcli, err := s.dockerClientInternal(ctx)
+	dockerClient, err := s.dockerClientInternal(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -233,7 +227,7 @@ func (s *Service) usedImagesInternal(ctx context.Context) (map[string]struct{}, 
 	if err != nil {
 		return nil, err
 	}
-	listResult, err := dcli.ContainerList(ctx, client.ContainerListOptions{All: false})
+	listResult, err := dockerClient.ContainerList(ctx, client.ContainerListOptions{All: false})
 	if err != nil {
 		return nil, err
 	}
@@ -245,14 +239,14 @@ func (s *Service) usedImagesInternal(ctx context.Context) (map[string]struct{}, 
 			out[imageRef] = struct{}{}
 			continue
 		}
-		inspectResult, inspectErr := utils.ContainerInspectWithCompatibility(ctx, dcli, summary.ID, client.ContainerInspectOptions{})
+		inspectResult, inspectErr := utils.ContainerInspectWithCompatibility(ctx, dockerClient, summary.ID, client.ContainerInspectOptions{})
 		if inspectErr != nil {
 			continue
 		}
 		if inspectResult.Container.Config != nil && s.config.LabelPolicy.IsUpdateDisabled(inspectResult.Container.Config.Labels) {
 			continue
 		}
-		for _, tag := range normalizedTagsForContainerInternal(ctx, dcli, inspectResult.Container) {
+		for _, tag := range normalizedTagsForContainerInternal(ctx, dockerClient, inspectResult.Container) {
 			out[tag] = struct{}{}
 		}
 	}

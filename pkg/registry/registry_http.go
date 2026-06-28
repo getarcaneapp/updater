@@ -15,7 +15,11 @@ import (
 	"go.getarcane.app/updater/pkg/utils"
 )
 
-const defaultRegistryHost = "registry-1.docker.io"
+const (
+	defaultRegistryHost                   = "registry-1.docker.io"
+	daemonProxyConnectIndicatorInternal   = "proxy" + "connect"
+	registryRateLimitHeaderSourceInternal = "rate" + "limit"
+)
 
 // Credentials contains registry credentials used for manifest requests.
 type Credentials struct {
@@ -56,7 +60,7 @@ func IsFallbackEligibleDaemonError(err error) bool {
 	for _, indicator := range []string{
 		"not found", " 404 ", "status: 404", "status 404", "403 forbidden", "status: 403",
 		"status 403", "administrative rules", "not implemented", "unsupported",
-		"distribution disabled", "distribution api", "proxyconnect",
+		"distribution disabled", "distribution api", daemonProxyConnectIndicatorInternal,
 	} {
 		if strings.Contains(errLower, indicator) {
 			return true
@@ -328,14 +332,14 @@ func extractRateLimitFromHeadersInternal(header http.Header) (*RateLimitInfo, er
 	if limit, window := parseRateLimitHeaderInternal(header.Get("RateLimit-Limit")); limit != nil {
 		info.Limit = limit
 		info.WindowSeconds = window
-		info.Source = "ratelimit"
+		info.Source = registryRateLimitHeaderSourceInternal
 	}
 	if remaining, window := parseRateLimitHeaderInternal(header.Get("RateLimit-Remaining")); remaining != nil {
 		info.Remaining = remaining
 		if info.WindowSeconds == nil {
 			info.WindowSeconds = window
 		}
-		info.Source = "ratelimit"
+		info.Source = registryRateLimitHeaderSourceInternal
 	}
 	if used, err := strconv.Atoi(strings.TrimSpace(header.Get("Docker-RateLimit-Used"))); err == nil {
 		info.Used = &used

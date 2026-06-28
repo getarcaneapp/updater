@@ -8,7 +8,6 @@ import (
 	"maps"
 	"slices"
 	"strings"
-	"time"
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/network"
@@ -21,22 +20,17 @@ import (
 
 // UpdateContainer updates a single Docker container by pulling its latest image and recreating it.
 func (s *Service) UpdateContainer(ctx context.Context, containerID string, opts types.Options) (out *types.Result, err error) {
-	start := time.Now()
-	out = &types.Result{Items: []types.ResourceResult{}, StartTime: start.UTC().Format(time.RFC3339)}
-	defer func() {
-		out.EndTime = time.Now().UTC().Format(time.RFC3339)
-		out.Duration = time.Since(start).String()
-		out.Success = err == nil && out.Failed == 0
-	}()
+	out, finish := newTimedResultInternal()
+	defer finish(&err)
 
-	dcli, err := s.dockerClientInternal(ctx)
+	dockerClient, err := s.dockerClientInternal(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("docker connect: %w", err)
 	}
 
 	filters := make(client.Filters)
 	filters = filters.Add("id", strings.TrimSpace(containerID))
-	containerList, err := dcli.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: filters})
+	containerList, err := dockerClient.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: filters})
 	if err != nil {
 		return nil, fmt.Errorf("list containers: %w", err)
 	}
@@ -46,7 +40,7 @@ func (s *Service) UpdateContainer(ctx context.Context, containerID string, opts 
 
 	target := containerList.Items[0]
 	name := utils.ContainerSummaryName(target)
-	inspectResult, err := utils.ContainerInspectWithCompatibility(ctx, dcli, target.ID, client.ContainerInspectOptions{})
+	inspectResult, err := utils.ContainerInspectWithCompatibility(ctx, dockerClient, target.ID, client.ContainerInspectOptions{})
 	if err != nil {
 		item := failedContainerResultInternal(target.ID, name, fmt.Sprintf("inspect failed: %v", err))
 		out.Items = append(out.Items, item)
@@ -82,7 +76,7 @@ func (s *Service) UpdateContainer(ctx context.Context, containerID string, opts 
 	}
 	imageRef, _ := ResolvePullableImageRef(target.Image, configImageRef, nil)
 	if imageRef == "" && inspect.Image != "" {
-		if imageInspect, inspectErr := dcli.ImageInspect(ctx, inspect.Image); inspectErr == nil {
+		if imageInspect, inspectErr := dockerClient.ImageInspect(ctx, inspect.Image); inspectErr == nil {
 			imageRef, _ = ResolvePullableImageRef(target.Image, configImageRef, imageInspect.RepoTags)
 		}
 	}
@@ -115,7 +109,7 @@ func (s *Service) UpdateContainer(ctx context.Context, containerID string, opts 
 		return out, nil
 	}
 
-	changed, compareErr := digest.NewChecker(dcli, nil).CompareWithPulled(ctx, inspect.Image, normalizedRef)
+	changed, compareErr := digest.NewChecker(dockerClient, nil).CompareWithPulled(ctx, inspect.Image, normalizedRef)
 	if compareErr == nil && !changed && !opts.Force {
 		item := skippedContainerResultInternal(target.ID, name, "image digest unchanged after pull")
 		out.Items = append(out.Items, item)
@@ -159,15 +153,15 @@ func (s *Service) UpdateStandaloneContainer(ctx context.Context, cnt container.S
 		return err
 	}
 
-	dcli, err := s.dockerClientInternal(ctx)
+	dockerClient, err := s.dockerClientInternal(ctx)
 	if err != nil {
 		return fmt.Errorf("docker connect: %w", err)
 	}
 
-	if err := s.stopAndRemoveStandaloneContainerInternal(ctx, dcli, cnt, inspect); err != nil {
+	if err := s.stopAndRemoveStandaloneContainerInternal(ctx, dockerClient, cnt, inspect); err != nil {
 		return err
 	}
-	_, err = s.createAndStartStandaloneContainerInternal(ctx, dcli, cnt, inspect, newRef)
+	_, err = s.createAndStartStandaloneContainerInternal(ctx, dockerClient, cnt, inspect, newRef)
 	return err
 }
 
@@ -178,26 +172,26 @@ func (s *Service) validateStandaloneContainerUpdateInternal(labels map[string]st
 	return nil
 }
 
-func (s *Service) stopAndRemoveStandaloneContainerInternal(ctx context.Context, dcli *client.Client, cnt container.Summary, inspect container.InspectResponse) error {
+func (s *Service) stopAndRemoveStandaloneContainerInternal(ctx context.Context, dockerClient *client.Client, cnt container.Summary, inspect container.InspectResponse) error {
 	labels := labelsFromInspectInternal(inspect)
 	name := utils.ContainerSummaryName(cnt)
 	stopOptions := client.ContainerStopOptions{}
 	if signal := s.config.LabelPolicy.StopSignal(labels); signal != "" {
 		stopOptions.Signal = signal
 	}
-	if _, err := dcli.ContainerStop(ctx, cnt.ID, stopOptions); err != nil {
+	if _, err := dockerClient.ContainerStop(ctx, cnt.ID, stopOptions); err != nil {
 		return fmt.Errorf("stop: %w", err)
 	}
 	_ = s.recordEventInternal(ctx, "container_stop", cnt.ID, name, types.ResourceTypeContainer, map[string]any{"action": "updater_stop"})
 
-	if _, err := dcli.ContainerRemove(ctx, cnt.ID, client.ContainerRemoveOptions{}); err != nil {
+	if _, err := dockerClient.ContainerRemove(ctx, cnt.ID, client.ContainerRemoveOptions{}); err != nil {
 		return fmt.Errorf("remove: %w", err)
 	}
 	_ = s.recordEventInternal(ctx, "container_delete", cnt.ID, name, types.ResourceTypeContainer, map[string]any{"action": "updater_delete"})
 	return nil
 }
 
-func (s *Service) createAndStartStandaloneContainerInternal(ctx context.Context, dcli *client.Client, cnt container.Summary, inspect container.InspectResponse, newRef string) (string, error) {
+func (s *Service) createAndStartStandaloneContainerInternal(ctx context.Context, dockerClient *client.Client, cnt container.Summary, inspect container.InspectResponse, newRef string) (string, error) {
 	name := utils.ContainerSummaryName(cnt)
 	cfg := inspect.Config
 	if cfg == nil {
@@ -207,13 +201,13 @@ func (s *Service) createAndStartStandaloneContainerInternal(ctx context.Context,
 	cfg.Image = newRef
 	if cfg.Labels != nil {
 		if _, ok := cfg.Labels["com.docker.compose.image"]; ok {
-			if imgInspect, inspectErr := dcli.ImageInspect(ctx, newRef); inspectErr == nil {
+			if imgInspect, inspectErr := dockerClient.ImageInspect(ctx, newRef); inspectErr == nil {
 				cfg.Labels["com.docker.compose.image"] = imgInspect.ID
 			}
 		}
 	}
 
-	hostConfig, _, _, err := utils.PrepareRecreateHostConfigForEngine(ctx, dcli, inspect.HostConfig)
+	hostConfig, _, _, err := utils.PrepareRecreateHostConfigForEngine(ctx, dockerClient, inspect.HostConfig)
 	if err != nil {
 		return "", fmt.Errorf("prepare host config: %w", err)
 	}
@@ -233,10 +227,10 @@ func (s *Service) createAndStartStandaloneContainerInternal(ctx context.Context,
 		}
 	}
 
-	apiVersion := utils.DetectAPIVersion(ctx, dcli)
+	apiVersion := utils.DetectAPIVersion(ctx, dockerClient)
 	networkingConfig := buildRecreateNetworkingConfigInternal(networkMode, inspect.NetworkSettings, apiVersion)
 	containerName := strings.TrimPrefix(inspect.Name, "/")
-	resp, err := utils.ContainerCreateWithCompatibilityForAPIVersion(ctx, dcli, client.ContainerCreateOptions{
+	resp, err := utils.ContainerCreateWithCompatibilityForAPIVersion(ctx, dockerClient, client.ContainerCreateOptions{
 		Config:           cfg,
 		HostConfig:       hostConfig,
 		NetworkingConfig: networkingConfig,
@@ -247,7 +241,7 @@ func (s *Service) createAndStartStandaloneContainerInternal(ctx context.Context,
 	}
 	_ = s.recordEventInternal(ctx, "container_create", resp.ID, name, types.ResourceTypeContainer, map[string]any{"action": "updater_create", "newImageID": resp.ID})
 
-	if _, err := dcli.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
+	if _, err := dockerClient.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
 		return resp.ID, fmt.Errorf("start: %w", err)
 	}
 	_ = s.recordEventInternal(ctx, "container_start", resp.ID, name, types.ResourceTypeContainer, map[string]any{"action": "updater_start"})
@@ -299,10 +293,10 @@ func (s *Service) updateComposeOrStandaloneInternal(ctx context.Context, target 
 	return s.UpdateStandaloneContainer(ctx, target, inspect, normalizedRef)
 }
 
-func normalizedTagsForContainerInternal(ctx context.Context, dcli *client.Client, inspect container.InspectResponse) []string {
+func normalizedTagsForContainerInternal(ctx context.Context, dockerClient *client.Client, inspect container.InspectResponse) []string {
 	seen := map[string]struct{}{}
-	if dcli != nil {
-		if imageInspect, err := dcli.ImageInspect(ctx, inspect.Image); err == nil {
+	if dockerClient != nil {
+		if imageInspect, err := dockerClient.ImageInspect(ctx, inspect.Image); err == nil {
 			for _, tag := range imageInspect.RepoTags {
 				if normalized := refs.NormalizeImageUpdateRef(tag); normalized != "" {
 					seen[normalized] = struct{}{}

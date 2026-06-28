@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -53,18 +54,21 @@ func newRegistryDigestResolverInternal(httpClient *http.Client) digest.RemoteRes
 }
 
 func (p defaultDockerClientProvider) DockerClient(ctx context.Context) (*client.Client, error) {
-	dcli, err := client.New(p.options...)
+	dockerClient, err := client.New(p.options...)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := dcli.Ping(ctx, client.PingOptions{}); err != nil {
+	if _, err := dockerClient.Ping(ctx, client.PingOptions{}); err != nil {
+		if closeErr := dockerClient.Close(); closeErr != nil {
+			return nil, fmt.Errorf("ping docker daemon: %w", errors.Join(err, closeErr))
+		}
 		return nil, fmt.Errorf("ping docker daemon: %w", err)
 	}
-	return dcli, nil
+	return dockerClient, nil
 }
 
 func (p defaultImagePuller) PullImage(ctx context.Context, imageRef string, progress io.Writer) error {
-	dcli, err := p.dockerClientProvider.DockerClient(ctx)
+	dockerClient, err := p.dockerClientProvider.DockerClient(ctx)
 	if err != nil {
 		return fmt.Errorf("docker connect: %w", err)
 	}
@@ -72,7 +76,7 @@ func (p defaultImagePuller) PullImage(ctx context.Context, imageRef string, prog
 	if err != nil {
 		return fmt.Errorf("registry auth: %w", err)
 	}
-	resp, err := dcli.ImagePull(ctx, imageRef, pullOptions)
+	resp, err := dockerClient.ImagePull(ctx, imageRef, pullOptions)
 	if err != nil {
 		return err
 	}

@@ -23,7 +23,7 @@ func TestDefaultImagePullerIgnoresRepositoryEnvAuthInternal(t *testing.T) {
 	t.Setenv("DOCKER_CONFIG", t.TempDir())
 
 	var gotAuth string
-	dcli := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
 		switch dockerAPIPathInternal(r.URL.Path) {
 		case "/images/create":
 			gotAuth = r.Header.Get(dockerregistry.AuthHeader)
@@ -36,7 +36,7 @@ func TestDefaultImagePullerIgnoresRepositoryEnvAuthInternal(t *testing.T) {
 		}
 	})
 
-	puller := defaultImagePuller{dockerClientProvider: fakeDockerClientProvider{client: dcli}}
+	puller := defaultImagePuller{dockerClientProvider: fakeDockerClientProvider{client: dockerClient}}
 	err := puller.PullImage(context.Background(), "registry.example.com/team/app:1.2.3", io.Discard)
 	if err != nil {
 		t.Fatalf("PullImage() error = %v", err)
@@ -55,7 +55,7 @@ func TestDefaultImagePullerUsesDockerConfigRegistryAuthInternal(t *testing.T) {
 	writeDockerConfigAuthInternal(t, dockerConfigDir, "registry.example.com", "config-user", "config-token")
 
 	var gotAuth string
-	dcli := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
 		switch dockerAPIPathInternal(r.URL.Path) {
 		case "/images/create":
 			gotAuth = r.Header.Get(dockerregistry.AuthHeader)
@@ -65,7 +65,7 @@ func TestDefaultImagePullerUsesDockerConfigRegistryAuthInternal(t *testing.T) {
 		}
 	})
 
-	puller := defaultImagePuller{dockerClientProvider: fakeDockerClientProvider{client: dcli}}
+	puller := defaultImagePuller{dockerClientProvider: fakeDockerClientProvider{client: dockerClient}}
 	err := puller.PullImage(context.Background(), "registry.example.com/team/app:1.2.3", io.Discard)
 	if err != nil {
 		t.Fatalf("PullImage() error = %v", err)
@@ -83,7 +83,7 @@ func TestDefaultImagePullerRetriesAnonymouslyAfterAuthRejectedInternal(t *testin
 	writeDockerConfigAuthInternal(t, dockerConfigDir, "registry.example.com", "config-user", "config-token")
 
 	var authHeaders []string
-	dcli := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
 		switch dockerAPIPathInternal(r.URL.Path) {
 		case "/images/create":
 			authHeaders = append(authHeaders, r.Header.Get(dockerregistry.AuthHeader))
@@ -97,7 +97,7 @@ func TestDefaultImagePullerRetriesAnonymouslyAfterAuthRejectedInternal(t *testin
 		}
 	})
 
-	puller := defaultImagePuller{dockerClientProvider: fakeDockerClientProvider{client: dcli}}
+	puller := defaultImagePuller{dockerClientProvider: fakeDockerClientProvider{client: dockerClient}}
 	err := puller.PullImage(context.Background(), "registry.example.com/team/app:1.2.3", io.Discard)
 	if err != nil {
 		t.Fatalf("PullImage() error = %v", err)

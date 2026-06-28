@@ -72,14 +72,14 @@ func (u dockerComposeProjectUpdater) resolveProjectMetadataInternal(ctx context.
 		return dockerComposeProjectMetadata{}, errors.New("compose project name is required")
 	}
 
-	dcli, err := u.dockerClientProvider.DockerClient(ctx)
+	dockerClient, err := u.dockerClientProvider.DockerClient(ctx)
 	if err != nil {
 		return dockerComposeProjectMetadata{}, fmt.Errorf("docker connect: %w", err)
 	}
 
 	filters := make(client.Filters)
 	filters = filters.Add("label", utils.ComposeProjectLabelKey+"="+composeName)
-	containers, err := dcli.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: filters})
+	containers, err := dockerClient.ContainerList(ctx, client.ContainerListOptions{All: true, Filters: filters})
 	if err != nil {
 		return dockerComposeProjectMetadata{}, fmt.Errorf("list compose containers: %w", err)
 	}

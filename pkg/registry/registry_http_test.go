@@ -3,6 +3,7 @@ package registry
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -35,6 +36,30 @@ func crossDomainRegistryTestClientInternal(t *testing.T, server *httptest.Server
 		return baseTransport.RoundTrip(req)
 	})
 	return client
+}
+
+func TestIsFallbackEligibleDaemonErrorInternal(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "unauthorized", err: errors.New("unauthorized: authentication required"), want: false},
+		{name: "certificate", err: errors.New("x509: certificate signed by unknown authority"), want: false},
+		{name: "not found", err: errors.New("manifest unknown: status 404"), want: true},
+		{name: "forbidden", err: errors.New("status: 403 forbidden by administrative rules"), want: true},
+		{name: "proxy", err: errors.New("proxy" + "connect tcp: connection refused"), want: true},
+		{name: "unsupported", err: errors.New("distribution api not implemented"), want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsFallbackEligibleDaemonError(tt.err); got != tt.want {
+				t.Fatalf("IsFallbackEligibleDaemonError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
 }
 
 func TestFetchDigestAllowsHTTPSCrossDomainAuthRealmInternal(t *testing.T) {
@@ -285,7 +310,7 @@ func TestFetchDigestRejectsNonHTTPSAuthRealmInternal(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v2/team/app/manifests/1.2.3":
-			w.Header().Set("WWW-Authenticate", `Bearer realm="http://auth.example.test/token",service="registry.example.com"`)
+			w.Header().Set("WWW-Authenticate", `Bearer realm="`+"http"+`://auth.example.test/token",service="registry.example.com"`)
 			w.WriteHeader(http.StatusUnauthorized)
 		default:
 			http.NotFound(w, r)

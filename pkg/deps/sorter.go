@@ -70,7 +70,7 @@ func (s *ContainerSorter) SortReverse() ([]ContainerWithDeps, error) {
 }
 
 // ExtractContainerDeps extracts dependency information from a container inspect response.
-func ExtractContainerDeps(ctx context.Context, dcli *client.Client, cnt container.Summary, inspect container.InspectResponse) ContainerWithDeps {
+func ExtractContainerDeps(ctx context.Context, dockerClient *client.Client, cnt container.Summary, inspect container.InspectResponse) ContainerWithDeps {
 	c := ContainerWithDeps{
 		Container: cnt,
 		Inspect:   inspect,
@@ -106,7 +106,7 @@ func ExtractContainerDeps(ctx context.Context, dcli *client.Client, cnt containe
 		}
 	}
 
-	slog.DebugContext(ctx, "ExtractContainerDeps: extracted dependencies", "container", c.Name, "links", c.Links, "dependsOn", c.DependsOn, "networkDeps", c.NetworkDeps, "dockerClient", dcli != nil)
+	slog.DebugContext(ctx, "ExtractContainerDeps: extracted dependencies", "container", c.Name, "links", c.Links, "dependsOn", c.DependsOn, "networkDeps", c.NetworkDeps, "dockerClient", dockerClient != nil)
 	return c
 }
 

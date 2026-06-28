@@ -1,9 +1,24 @@
 package api
 
 import (
+	"time"
+
 	"github.com/moby/moby/api/types/container"
 	"go.getarcane.app/updater/types"
 )
+
+func newTimedResultInternal() (*types.Result, func(*error)) {
+	start := time.Now()
+	out := &types.Result{
+		Items:     make([]types.ResourceResult, 0),
+		StartTime: start.UTC().Format(time.RFC3339),
+	}
+	return out, func(err *error) {
+		out.EndTime = time.Now().UTC().Format(time.RFC3339)
+		out.Duration = time.Since(start).String()
+		out.Success = (err == nil || *err == nil) && out.Failed == 0
+	}
+}
 
 func (s *Service) applyResultCountInternal(out *types.Result, item types.ResourceResult) {
 	switch item.Status {

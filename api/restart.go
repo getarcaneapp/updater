@@ -17,12 +17,12 @@ import (
 
 // RestartContainersUsingOldImages restarts running containers matching old image IDs or refs.
 func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNewRef map[string]string, oldRefToNewRef map[string]string) ([]types.ResourceResult, error) {
-	dcli, err := s.dockerClientInternal(ctx)
+	dockerClient, err := s.dockerClientInternal(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("docker connect: %w", err)
 	}
 
-	listResult, err := dcli.ContainerList(ctx, client.ContainerListOptions{All: false})
+	listResult, err := dockerClient.ContainerList(ctx, client.ContainerListOptions{All: false})
 	if err != nil {
 		return nil, fmt.Errorf("list containers: %w", err)
 	}
@@ -31,7 +31,7 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 	if err != nil {
 		return nil, err
 	}
-	dockerProxyName := dockerProxyContainerNameInternal(dockerHostInternal(dcli))
+	dockerProxyName := dockerProxyContainerNameInternal(dockerHostInternal(dockerClient))
 
 	updatedNorm := map[string]string{}
 	for oldRef, newRef := range oldRefToNewRef {
@@ -59,7 +59,7 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 		var inspected *container.InspectResponse
 		newRef, matchValue := match.ResolveContainerImageMatch(summary, nil, oldIDToNewRef, updatedNorm)
 		if newRef == "" && match.ShouldInspectUnmatchedContainerForImageMatch(summary) {
-			inspectResult, inspectErr := utils.ContainerInspectWithCompatibility(ctx, dcli, summary.ID, client.ContainerInspectOptions{})
+			inspectResult, inspectErr := utils.ContainerInspectWithCompatibility(ctx, dockerClient, summary.ID, client.ContainerInspectOptions{})
 			if inspectErr == nil {
 				inspected = &inspectResult.Container
 				newRef, matchValue = match.ResolveContainerImageMatch(summary, inspected, oldIDToNewRef, updatedNorm)
@@ -69,7 +69,7 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 		if newRef != "" {
 			targetIDs, cached := targetImageIDs[newRef]
 			if !cached {
-				targetIDs, _ = digest.NewChecker(dcli, nil).GetImageIDsForRef(ctx, newRef)
+				targetIDs, _ = digest.NewChecker(dockerClient, nil).GetImageIDsForRef(ctx, newRef)
 				targetImageIDs[newRef] = targetIDs
 			}
 			currentImageID := match.CurrentContainerImageID(summary, inspected)
@@ -89,15 +89,15 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 		for i := range containersWithDeps {
 			cwd := containersWithDeps[i]
 			if plan, ok := plansByName[cwd.Name]; ok && plan.inspect != nil {
-				containersWithDeps[i] = deps.ExtractContainerDeps(ctx, dcli, cwd.Container, *plan.inspect)
+				containersWithDeps[i] = deps.ExtractContainerDeps(ctx, dockerClient, cwd.Container, *plan.inspect)
 				continue
 			}
-			inspectResult, inspectErr := utils.ContainerInspectWithCompatibility(ctx, dcli, cwd.Container.ID, client.ContainerInspectOptions{})
+			inspectResult, inspectErr := utils.ContainerInspectWithCompatibility(ctx, dockerClient, cwd.Container.ID, client.ContainerInspectOptions{})
 			if inspectErr != nil {
 				continue
 			}
 			inspect := inspectResult.Container
-			containersWithDeps[i] = deps.ExtractContainerDeps(ctx, dcli, cwd.Container, inspect)
+			containersWithDeps[i] = deps.ExtractContainerDeps(ctx, dockerClient, cwd.Container, inspect)
 			if plan, ok := plansByName[containersWithDeps[i].Name]; ok {
 				plan.inspect = &inspect
 			}
@@ -134,9 +134,9 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 	composeGroups := s.buildComposeGroupsInternal(ctx, sorted, plansByName)
 	processedProjects := map[string]bool{}
 	projectResults := map[string]error{}
-	standaloneCandidates := []deps.ContainerWithDeps{}
+	var standaloneCandidates []deps.ContainerWithDeps
 	standaloneResultIndexes := map[string]int{}
-	selfUpdateCandidates := []selfUpdatePlan{}
+	var selfUpdateCandidates []selfUpdatePlan
 	selfUpdateResultIndexes := map[string]int{}
 
 	var results []types.ResourceResult
@@ -146,7 +146,7 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 			continue
 		}
 		if plan.inspect == nil {
-			inspectResult, inspectErr := utils.ContainerInspectWithCompatibility(ctx, dcli, plan.cnt.ID, client.ContainerInspectOptions{})
+			inspectResult, inspectErr := utils.ContainerInspectWithCompatibility(ctx, dockerClient, plan.cnt.ID, client.ContainerInspectOptions{})
 			if inspectErr != nil {
 				results = append(results, failedContainerResultInternal(plan.cnt.ID, candidate.Name, fmt.Sprintf("inspect failed: %v", inspectErr)))
 				continue
@@ -196,7 +196,7 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 						return
 					}
 				}
-				if verifyErr := match.VerifyComposeServiceUpdatedImage(ctx, dcli, projectName, serviceName, match.CurrentContainerImageID(plan.cnt, plan.inspect)); verifyErr != nil {
+				if verifyErr := match.VerifyComposeServiceUpdatedImage(ctx, dockerClient, projectName, serviceName, match.CurrentContainerImageID(plan.cnt, plan.inspect)); verifyErr != nil {
 					res.Status = types.StatusFailed
 					res.Error = fmt.Sprintf("service update verification failed: %v", verifyErr)
 					return
@@ -234,7 +234,7 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 	}
 
 	if len(standaloneCandidates) > 0 {
-		standaloneResults := s.updateStandaloneRestartCandidatesInternal(ctx, dcli, standaloneCandidates, plansByName)
+		standaloneResults := s.updateStandaloneRestartCandidatesInternal(ctx, dockerClient, standaloneCandidates, plansByName)
 		for _, result := range standaloneResults {
 			if index, ok := standaloneResultIndexes[result.ResourceName]; ok {
 				results[index] = result
@@ -272,7 +272,7 @@ type selfUpdatePlan struct {
 	labels      map[string]string
 }
 
-func (s *Service) updateStandaloneRestartCandidatesInternal(ctx context.Context, dcli *client.Client, candidates []deps.ContainerWithDeps, plansByName map[string]*restartPlan) []types.ResourceResult {
+func (s *Service) updateStandaloneRestartCandidatesInternal(ctx context.Context, dockerClient *client.Client, candidates []deps.ContainerWithDeps, plansByName map[string]*restartPlan) []types.ResourceResult {
 	endStatus := make([]func(), 0, len(candidates))
 	for _, candidate := range candidates {
 		if plan := plansByName[candidate.Name]; plan != nil {
@@ -293,7 +293,7 @@ func (s *Service) updateStandaloneRestartCandidatesInternal(ctx context.Context,
 			continue
 		}
 		result := standaloneRestartResultInternal(candidate, plan)
-		if err := s.stopAndRemoveStandaloneContainerInternal(ctx, dcli, plan.cnt, *plan.inspect); err != nil {
+		if err := s.stopAndRemoveStandaloneContainerInternal(ctx, dockerClient, plan.cnt, *plan.inspect); err != nil {
 			result.Status = types.StatusFailed
 			result.Error = err.Error()
 		}
@@ -314,7 +314,7 @@ func (s *Service) updateStandaloneRestartCandidatesInternal(ctx context.Context,
 			continue
 		}
 
-		if _, err := s.createAndStartStandaloneContainerInternal(ctx, dcli, plan.cnt, *plan.inspect, plan.newRef); err != nil {
+		if _, err := s.createAndStartStandaloneContainerInternal(ctx, dockerClient, plan.cnt, *plan.inspect, plan.newRef); err != nil {
 			result.Status = types.StatusFailed
 			result.Error = err.Error()
 			resultsByName[candidate.Name] = result
