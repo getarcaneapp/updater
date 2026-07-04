@@ -76,7 +76,7 @@ func (s *Service) ApplyPending(ctx context.Context, opts types.Options) (out *ty
 			continue
 		}
 
-		if check := digestChecker.CheckImageNeedsUpdate(ctx, refs.NormalizeImageUpdateRef(plan.newRef)); check.CheckedViaAPI && check.Error == nil && !check.NeedsUpdate && !opts.Force {
+		if !opts.Force && planImageUpToDateInternal(ctx, digestChecker, plan) {
 			item.Status = types.StatusSkipped
 			item.Error = "image already up to date"
 			out.Skipped++
@@ -148,6 +148,19 @@ func (s *Service) ApplyPending(ctx context.Context, opts types.Options) (out *ty
 		}
 	}
 	return out, nil
+}
+
+func planImageUpToDateInternal(ctx context.Context, checker *digest.Checker, plan updatePlan) bool {
+	imageRef := refs.NormalizeImageUpdateRef(plan.newRef)
+	if plan.record.IsDigestUpdate() && plan.record.LatestDigest != nil {
+		if knownDigest := strings.TrimSpace(*plan.record.LatestDigest); knownDigest != "" {
+			check := checker.CheckImageMatchesKnownDigest(ctx, imageRef, knownDigest)
+			return check.Error == nil && !check.NeedsUpdate
+		}
+	}
+
+	check := checker.CheckImageNeedsUpdate(ctx, imageRef)
+	return check.CheckedViaAPI && check.Error == nil && !check.NeedsUpdate
 }
 
 func (s *Service) dockerClientInternal(ctx context.Context) (*client.Client, error) {

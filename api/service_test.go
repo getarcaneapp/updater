@@ -74,6 +74,7 @@ func (f *fakeRunRecorder) RecordUpdateRun(ctx context.Context, result types.Reso
 type fakePuller struct {
 	pulled []string
 	err    error
+	after  func(imageRef string)
 }
 
 func (f *fakePuller) PullImage(ctx context.Context, imageRef string, progress io.Writer) error {
@@ -88,7 +89,13 @@ func (f *fakePuller) PullImage(ctx context.Context, imageRef string, progress io
 			return err
 		}
 	}
-	return f.err
+	if f.err != nil {
+		return f.err
+	}
+	if f.after != nil {
+		f.after(imageRef)
+	}
+	return nil
 }
 
 type fakeDigestResolver struct{}
@@ -103,6 +110,25 @@ func (fakeDigestResolver) GetImageDigest(ctx context.Context, imageRef string) (
 		return "", errors.New("image ref is required")
 	}
 	return digest.FromString(imageRef).String(), nil
+}
+
+type countingDigestResolver struct {
+	digest string
+	err    error
+	calls  int
+}
+
+func (r *countingDigestResolver) GetImageDigest(ctx context.Context, imageRef string) (string, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+	}
+	r.calls++
+	if r.err != nil {
+		return "", r.err
+	}
+	return r.digest, nil
 }
 
 type fakeProjectUpdater struct {
@@ -446,6 +472,133 @@ func TestApplyPendingForceBypassesUnchangedPulledImageSkipInternal(t *testing.T)
 	}
 	if len(store.cleared) != 1 || store.cleared[0] != "record-1" {
 		t.Fatalf("cleared records = %#v, want record-1", store.cleared)
+	}
+}
+
+func TestApplyPendingUsesRecordDigestBeforeResolverInternal(t *testing.T) {
+	oldDigest := digest.FromString("old-record-digest").String()
+	newDigest := digest.FromString("new-record-digest").String()
+
+	store := &fakePendingStore{records: []types.ImageUpdateRecord{{
+		ID:           "record-1",
+		Repository:   "nginx",
+		Tag:          "1.27",
+		HasUpdate:    true,
+		UpdateType:   types.UpdateTypeDigest,
+		LatestDigest: &newDigest,
+	}}}
+	pulled := false
+	puller := &fakePuller{after: func(string) {
+		pulled = true
+	}}
+	resolver := &countingDigestResolver{digest: oldDigest}
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		switch dockerAPIPathInternal(r.URL.Path) {
+		case "/images/nginx:1.27/json", "/images/docker.io/library/nginx:1.27/json":
+			if !pulled {
+				writeDockerJSONInternal(t, w, image.InspectResponse{
+					ID:          "sha256:old-image",
+					RepoTags:    []string{"nginx:1.27"},
+					RepoDigests: []string{"nginx@" + oldDigest},
+				})
+				return
+			}
+			writeDockerJSONInternal(t, w, image.InspectResponse{
+				ID:          "sha256:new-image",
+				RepoTags:    []string{"nginx:1.27"},
+				RepoDigests: []string{"nginx@" + newDigest},
+			})
+		case "/containers/json":
+			writeDockerJSONInternal(t, w, []container.Summary{})
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	service := newServiceInternal(Config{
+		DockerClientProvider:   fakeDockerClientProvider{client: dockerClient},
+		PendingStore:           store,
+		ImagePuller:            puller,
+		RegistryDigestResolver: resolver,
+		UsedImageCollector: UsedImageCollectorFunc(func(context.Context) (map[string]struct{}, error) {
+			return map[string]struct{}{"docker.io/library/nginx:1.27": {}}, nil
+		}),
+	})
+
+	got, err := service.ApplyPending(context.Background(), types.Options{})
+	if err != nil {
+		t.Fatalf("ApplyPending() error = %v", err)
+	}
+	if got.Checked != 1 || got.Updated != 1 || got.Skipped != 0 || got.Failed != 0 {
+		t.Fatalf("ApplyPending() counts = checked:%d updated:%d skipped:%d failed:%d", got.Checked, got.Updated, got.Skipped, got.Failed)
+	}
+	if len(got.Items) != 1 || got.Items[0].Status != types.StatusUpdated {
+		t.Fatalf("ApplyPending() items = %#v, want one updated item", got.Items)
+	}
+	if len(puller.pulled) != 1 || puller.pulled[0] != "nginx:1.27" {
+		t.Fatalf("pulled images = %#v, want nginx:1.27", puller.pulled)
+	}
+	if resolver.calls != 0 {
+		t.Fatalf("resolver calls = %d, want 0", resolver.calls)
+	}
+	if len(store.cleared) != 1 || store.cleared[0] != "record-1" {
+		t.Fatalf("cleared records = %#v, want record-1", store.cleared)
+	}
+}
+
+func TestApplyPendingSkipsWhenKnownDigestMatchesAnyLocalRepoDigestInternal(t *testing.T) {
+	firstDigest := digest.FromString("first-local-digest").String()
+	secondDigest := digest.FromString("second-local-digest").String()
+
+	store := &fakePendingStore{records: []types.ImageUpdateRecord{{
+		ID:           "record-1",
+		Repository:   "nginx",
+		Tag:          "1.27",
+		HasUpdate:    true,
+		UpdateType:   types.UpdateTypeDigest,
+		LatestDigest: &secondDigest,
+	}}}
+	puller := &fakePuller{}
+	resolver := &countingDigestResolver{digest: secondDigest}
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		switch dockerAPIPathInternal(r.URL.Path) {
+		case "/images/nginx:1.27/json", "/images/docker.io/library/nginx:1.27/json":
+			writeDockerJSONInternal(t, w, image.InspectResponse{
+				ID:          "sha256:same",
+				RepoTags:    []string{"nginx:1.27"},
+				RepoDigests: []string{"nginx@" + firstDigest, "nginx@" + secondDigest},
+			})
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	service := newServiceInternal(Config{
+		DockerClientProvider:   fakeDockerClientProvider{client: dockerClient},
+		PendingStore:           store,
+		ImagePuller:            puller,
+		RegistryDigestResolver: resolver,
+		UsedImageCollector: UsedImageCollectorFunc(func(context.Context) (map[string]struct{}, error) {
+			return map[string]struct{}{"docker.io/library/nginx:1.27": {}}, nil
+		}),
+	})
+
+	got, err := service.ApplyPending(context.Background(), types.Options{})
+	if err != nil {
+		t.Fatalf("ApplyPending() error = %v", err)
+	}
+	if got.Checked != 1 || got.Updated != 0 || got.Skipped != 1 || got.Failed != 0 {
+		t.Fatalf("ApplyPending() counts = checked:%d updated:%d skipped:%d failed:%d", got.Checked, got.Updated, got.Skipped, got.Failed)
+	}
+	if len(got.Items) != 1 || got.Items[0].Status != types.StatusSkipped {
+		t.Fatalf("ApplyPending() items = %#v, want one skipped item", got.Items)
+	}
+	if len(puller.pulled) != 0 {
+		t.Fatalf("pulled images = %#v, want none", puller.pulled)
+	}
+	if resolver.calls != 0 {
+		t.Fatalf("resolver calls = %d, want 0", resolver.calls)
+	}
+	if len(store.cleared) != 0 {
+		t.Fatalf("cleared records = %#v, want none", store.cleared)
 	}
 }
 

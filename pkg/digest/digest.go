@@ -8,7 +8,7 @@ import (
 	"strings"
 
 	"github.com/moby/moby/client"
-	ocidigest "github.com/opencontainers/go-digest"
+	oci "github.com/opencontainers/go-digest"
 	"go.getarcane.app/updater/pkg/refs"
 )
 
@@ -39,7 +39,7 @@ func NewChecker(dockerClient *client.Client, digestResolver RemoteResolver) *Che
 
 // Normalize parses and canonicalizes an OCI digest.
 func Normalize(value string) (string, error) {
-	parsed, err := ocidigest.Parse(strings.TrimSpace(value))
+	parsed, err := oci.Parse(strings.TrimSpace(value))
 	if err != nil {
 		return "", fmt.Errorf("invalid OCI digest %q: %w", value, err)
 	}
@@ -96,6 +96,48 @@ func (c *Checker) CheckImageNeedsUpdate(ctx context.Context, imageRef string) Ch
 	result.RemoteDigest = remoteDigest
 	result.CheckedViaAPI = true
 	result.NeedsUpdate = localDigest != remoteDigest
+	return result
+}
+
+// CheckImageMatchesKnownDigest reports whether the local image already carries
+// a digest resolved earlier, avoiding a registry round-trip.
+func (c *Checker) CheckImageMatchesKnownDigest(ctx context.Context, imageRef, knownDigest string) CheckResult {
+	result := CheckResult{}
+
+	normalizedDigest, err := Normalize(knownDigest)
+	if err != nil {
+		result.Error = err
+		return result
+	}
+	result.RemoteDigest = normalizedDigest
+
+	if c == nil || c.dockerClient == nil {
+		result.Error = errors.New("docker client unavailable")
+		return result
+	}
+
+	inspect, err := c.dockerClient.ImageInspect(ctx, imageRef)
+	if err != nil {
+		result.NeedsUpdate = true
+		result.Error = err
+		return result
+	}
+
+	for _, repoDigest := range inspect.RepoDigests {
+		localDigest, ok := FromReferenceSuffix(repoDigest)
+		if !ok {
+			continue
+		}
+		result.LocalDigest = localDigest
+		if localDigest == normalizedDigest {
+			return result
+		}
+	}
+
+	if result.LocalDigest == "" && strings.TrimSpace(inspect.ID) != "" {
+		result.LocalDigest = strings.TrimSpace(inspect.ID)
+	}
+	result.NeedsUpdate = true
 	return result
 }
 
