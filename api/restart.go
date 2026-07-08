@@ -15,7 +15,9 @@ import (
 	"go.getarcane.app/updater/types"
 )
 
-// RestartContainersUsingOldImages restarts running containers matching old image IDs or refs.
+// RestartContainersUsingOldImages restarts running containers matching old image
+// IDs or refs. If dependency sorting detects a cycle, containers are restarted
+// in discovery order to preserve historical best-effort behavior.
 func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNewRef map[string]string, oldRefToNewRef map[string]string) ([]types.ResourceResult, error) {
 	dockerClient, err := s.dockerClientInternal(ctx)
 	if err != nil {
@@ -127,6 +129,7 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 	sorter := deps.NewContainerSorter(candidates)
 	sorted, sortErr := sorter.Sort()
 	if sortErr != nil {
+		s.logger.WarnContext(ctx, "container dependency sort failed; restarting in discovery order", "error", sortErr)
 		sorted = candidates
 	}
 	sorted = orderSelfUpdateLastInternal(sorted, plansByName, s.config.LabelPolicy)
@@ -180,31 +183,7 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 			serviceName := utils.ComposeServiceLabel(labels)
 			projectID := composeProjectIDInternal(projectName, composeGroups)
 			if projectID != "" && serviceName != "" && !s.isSelfUpdateCandidateInternal(plan.cnt.ID, labels) {
-				if projectErr := projectResults[projectID]; projectErr != nil {
-					res.Status = types.StatusFailed
-					res.Error = fmt.Sprintf("project-level update failed: %v", projectErr)
-					return
-				}
-				if !processedProjects[projectID] {
-					group := composeGroups[projectID]
-					projectErr := s.config.ProjectUpdater.UpdateServices(ctx, projectID, group.services)
-					processedProjects[projectID] = true
-					if projectErr != nil {
-						projectResults[projectID] = projectErr
-						res.Status = types.StatusFailed
-						res.Error = fmt.Sprintf("project-level update failed: %v", projectErr)
-						return
-					}
-				}
-				if verifyErr := match.VerifyComposeServiceUpdatedImage(ctx, dockerClient, projectName, serviceName, match.CurrentContainerImageID(plan.cnt, plan.inspect)); verifyErr != nil {
-					res.Status = types.StatusFailed
-					res.Error = fmt.Sprintf("service update verification failed: %v", verifyErr)
-					return
-				}
-				res.Status = types.StatusUpdated
-				res.UpdateAvailable = true
-				res.UpdateApplied = true
-				_ = s.notifyInternal(ctx, plan.cnt.ID, candidate.Name, plan.newRef, plan.match, refs.NormalizeImageUpdateRef(plan.newRef))
+				res = s.applyComposeServiceUpdateInternal(ctx, dockerClient, res, plan, candidate.Name, projectID, projectName, serviceName, composeGroups, processedProjects, projectResults)
 				return
 			}
 
@@ -314,9 +293,15 @@ func (s *Service) updateStandaloneRestartCandidatesInternal(ctx context.Context,
 			continue
 		}
 
-		if _, err := s.createAndStartStandaloneContainerInternal(ctx, dockerClient, plan.cnt, *plan.inspect, plan.newRef); err != nil {
+		createdID, err := s.createAndStartStandaloneContainerInternal(ctx, dockerClient, plan.cnt, *plan.inspect, plan.newRef)
+		if err != nil {
 			result.Status = types.StatusFailed
-			result.Error = err.Error()
+			s.removeFailedCreatedContainerInternal(ctx, dockerClient, createdID, candidate.Name)
+			if rollbackErr := s.rollbackStandaloneContainerInternal(ctx, dockerClient, plan.cnt, *plan.inspect); rollbackErr != nil {
+				result.Error = fmt.Sprintf("%v; rollback failed: %v", err, rollbackErr)
+			} else {
+				result.Error = fmt.Sprintf("%v; rollback succeeded", err)
+			}
 			resultsByName[candidate.Name] = result
 			continue
 		}
@@ -339,6 +324,52 @@ func (s *Service) updateStandaloneRestartCandidatesInternal(ctx context.Context,
 		}
 	}
 	return out
+}
+
+func (s *Service) applyComposeServiceUpdateInternal(
+	ctx context.Context,
+	dockerClient *client.Client,
+	res types.ResourceResult,
+	plan *restartPlan,
+	containerName string,
+	projectID string,
+	projectName string,
+	serviceName string,
+	composeGroups map[string]composeGroup,
+	processedProjects map[string]bool,
+	projectResults map[string]error,
+) types.ResourceResult {
+	if !processedProjects[projectID] {
+		group := composeGroups[projectID]
+		opCtx, cancel := s.opCtxInternal(ctx)
+		projectErr := s.config.ProjectUpdater.UpdateServices(opCtx, projectID, group.services)
+		cancel()
+		processedProjects[projectID] = true
+		if projectErr != nil {
+			projectResults[projectID] = projectErr
+		}
+	}
+
+	projectErr := projectResults[projectID]
+	verifyErr := match.VerifyComposeServiceUpdatedImage(ctx, dockerClient, projectName, serviceName, match.CurrentContainerImageID(plan.cnt, plan.inspect))
+	if verifyErr != nil {
+		res.Status = types.StatusFailed
+		if projectErr != nil {
+			res.Error = fmt.Sprintf("project-level update failed: %v; service update verification failed: %v", projectErr, verifyErr)
+		} else {
+			res.Error = fmt.Sprintf("service update verification failed: %v", verifyErr)
+		}
+		return res
+	}
+
+	if projectErr != nil {
+		s.logger.WarnContext(ctx, "service updated despite project-level compose error", "projectID", projectID, "projectName", projectName, "serviceName", serviceName, "error", projectErr)
+	}
+	res.Status = types.StatusUpdated
+	res.UpdateAvailable = true
+	res.UpdateApplied = true
+	_ = s.notifyInternal(ctx, plan.cnt.ID, containerName, plan.newRef, plan.match, refs.NormalizeImageUpdateRef(plan.newRef))
+	return res
 }
 
 func standaloneRestartResultInternal(candidate deps.ContainerWithDeps, plan *restartPlan) types.ResourceResult {

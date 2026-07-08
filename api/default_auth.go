@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -15,12 +16,13 @@ import (
 	"go.getarcane.app/updater/pkg/utils"
 )
 
-func defaultImagePullOptionsInternal(imageRef string) (client.ImagePullOptions, error) {
-	authConfig, ok, err := defaultRegistryAuthConfigInternal(imageRef)
+func defaultImagePullOptionsInternal(ctx context.Context, imageRef string) (client.ImagePullOptions, error) {
+	authConfig, ok, err := defaultRegistryAuthConfigInternal(ctx, imageRef)
 	if err != nil {
 		return client.ImagePullOptions{}, err
 	}
 	if !ok {
+		logAnonymousRegistryFallbackInternal(ctx, imageRef, "no credentials found", nil)
 		return client.ImagePullOptions{}, nil
 	}
 
@@ -34,12 +36,13 @@ func defaultImagePullOptionsInternal(imageRef string) (client.ImagePullOptions, 
 	}, nil
 }
 
-func defaultDigestCredentialsInternal(imageRef string) (*updaterregistry.Credentials, error) {
-	authConfig, ok, err := defaultRegistryAuthConfigInternal(imageRef)
+func defaultDigestCredentialsInternal(ctx context.Context, imageRef string) (*updaterregistry.Credentials, error) {
+	authConfig, ok, err := defaultRegistryAuthConfigInternal(ctx, imageRef)
 	if err != nil {
 		return nil, err
 	}
 	if !ok {
+		logAnonymousRegistryFallbackInternal(ctx, imageRef, "no credentials found", nil)
 		return nil, nil
 	}
 
@@ -49,16 +52,17 @@ func defaultDigestCredentialsInternal(imageRef string) (*updaterregistry.Credent
 		token = strings.TrimSpace(authConfig.IdentityToken)
 	}
 	if username == "" || token == "" {
+		logAnonymousRegistryFallbackInternal(ctx, imageRef, "credentials missing username or token", nil)
 		return nil, nil
 	}
 	return &updaterregistry.Credentials{Username: username, Token: token}, nil
 }
 
-func defaultRegistryAuthConfigInternal(imageRef string) (dockerregistry.AuthConfig, bool, error) {
-	return defaultDockerConfigRegistryAuthConfigInternal(imageRef)
+func defaultRegistryAuthConfigInternal(ctx context.Context, imageRef string) (dockerregistry.AuthConfig, bool, error) {
+	return defaultDockerConfigRegistryAuthConfigInternal(ctx, imageRef)
 }
 
-func defaultDockerConfigRegistryAuthConfigInternal(imageRef string) (dockerregistry.AuthConfig, bool, error) {
+func defaultDockerConfigRegistryAuthConfigInternal(ctx context.Context, imageRef string) (dockerregistry.AuthConfig, bool, error) {
 	server, err := utils.GetRegistryAddress(imageRef)
 	if err != nil {
 		return dockerregistry.AuthConfig{}, false, fmt.Errorf("get registry address: %w", err)
@@ -76,10 +80,12 @@ func defaultDockerConfigRegistryAuthConfigInternal(imageRef string) (dockerregis
 	authConfig, err := configFile.GetAuthConfig(server)
 	if err == nil {
 		if defaultDockerConfigAuthEmptyInternal(authConfig) {
+			logAnonymousRegistryFallbackInternal(ctx, imageRef, "empty credentials", nil)
 			return dockerregistry.AuthConfig{}, false, nil
 		}
 		return dockerRegistryAuthConfigFromDockerConfigInternal(authConfig), true, nil
 	}
+	logAnonymousRegistryFallbackInternal(ctx, imageRef, "credential lookup failed", err)
 	return dockerregistry.AuthConfig{}, false, nil
 }
 
@@ -104,4 +110,12 @@ func defaultDockerConfigAuthEmptyInternal(authConfig dockerCliConfigTypes.AuthCo
 
 func defaultAnonymousAuthHandlerInternal(context.Context) (string, error) {
 	return "", nil
+}
+
+func logAnonymousRegistryFallbackInternal(ctx context.Context, imageRef, reason string, err error) {
+	args := []any{"imageRef", imageRef, "reason", reason}
+	if err != nil {
+		args = append(args, "error", err)
+	}
+	slog.DebugContext(ctx, "registry credentials unavailable; proceeding anonymously", args...)
 }

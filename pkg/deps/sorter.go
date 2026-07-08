@@ -51,7 +51,7 @@ func NewContainerSorter(containers []ContainerWithDeps) *ContainerSorter {
 func (s *ContainerSorter) Sort() ([]ContainerWithDeps, error) {
 	for _, c := range s.containers {
 		if !s.visited[c.Name] {
-			if err := s.visitInternal(c); err != nil {
+			if err := s.visitInternal(c, nil); err != nil {
 				return nil, err
 			}
 		}
@@ -132,9 +132,14 @@ func UpdateImplicitRestart(containers []ContainerWithDeps, markedForRestart map[
 	return implicitRestarts
 }
 
-func (s *ContainerSorter) visitInternal(c ContainerWithDeps) error {
+func (s *ContainerSorter) visitInternal(c ContainerWithDeps, path []string) error {
 	if s.marked[c.Name] {
-		return fmt.Errorf("circular dependency detected: %s", c.Name)
+		cycle := append(path, c.Name)
+		start := slices.Index(cycle, c.Name)
+		if start >= 0 {
+			cycle = cycle[start:]
+		}
+		return fmt.Errorf("circular dependency detected: %s", strings.Join(cycle, " -> "))
 	}
 	if s.visited[c.Name] {
 		return nil
@@ -142,10 +147,11 @@ func (s *ContainerSorter) visitInternal(c ContainerWithDeps) error {
 
 	s.marked[c.Name] = true
 	defer delete(s.marked, c.Name)
+	path = append(path, c.Name)
 
 	for _, depName := range s.getAllDependenciesInternal(c) {
 		if idx, ok := s.nameToIndex[depName]; ok {
-			if err := s.visitInternal(s.containers[idx]); err != nil {
+			if err := s.visitInternal(s.containers[idx], path); err != nil {
 				return err
 			}
 		}

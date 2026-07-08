@@ -128,6 +128,34 @@ func TestFetchDigestAllowsHTTPSCrossDomainAuthRealmInternal(t *testing.T) {
 	}
 }
 
+func TestFetchDigestAcceptsManifestListsAndOCIIndexesInternal(t *testing.T) {
+	wantDigest := "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+	var accept string
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		accept = r.Header.Get("Accept")
+		w.Header().Set("Docker-Content-Digest", wantDigest)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	serverURL, err := url.Parse(server.URL)
+	if err != nil {
+		t.Fatalf("parse server url: %v", err)
+	}
+
+	if _, err := FetchDigest(context.Background(), serverURL.Host, "team/app", "1.2.3", nil, server.Client()); err != nil {
+		t.Fatalf("FetchDigest() error = %v", err)
+	}
+	for _, mediaType := range []string{
+		"application/vnd.docker.distribution.manifest.list.v2+json",
+		"application/vnd.oci.image.index.v1+json",
+	} {
+		if !strings.Contains(accept, mediaType) {
+			t.Fatalf("Accept = %q, want %s", accept, mediaType)
+		}
+	}
+}
+
 func TestFetchDigestUsesCredentialsForHTTPSAuthRealmInternal(t *testing.T) {
 	wantDigest := "sha256:2222222222222222222222222222222222222222222222222222222222222222"
 	var tokenUser string

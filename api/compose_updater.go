@@ -61,7 +61,7 @@ func (u dockerComposeProjectUpdater) UpdateServices(ctx context.Context, project
 	}
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("docker compose update failed: %w: %s", err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("docker compose update failed: %w: %s", err, truncateComposeOutputInternal(strings.TrimSpace(string(output))))
 	}
 	return nil
 }
@@ -115,4 +115,13 @@ func normalizeComposeServicesInternal(services []string) []string {
 		out = append(out, service)
 	}
 	return out
+}
+
+func truncateComposeOutputInternal(output string) string {
+	const maxComposeErrorOutput = 4096
+	output = strings.TrimSpace(output)
+	if len(output) <= maxComposeErrorOutput {
+		return output
+	}
+	return output[:maxComposeErrorOutput] + " (truncated)"
 }

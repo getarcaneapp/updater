@@ -40,7 +40,11 @@ func (s *Service) ApplyPending(ctx context.Context, opts types.Options) (out *ty
 		return out, nil
 	}
 
-	plans := s.buildUpdatePlansInternal(ctx, records, usedImages)
+	var planDockerClient *client.Client
+	if dockerClient, dockerErr := s.dockerClientInternal(ctx); dockerErr == nil {
+		planDockerClient = dockerClient
+	}
+	plans := s.buildUpdatePlansInternal(ctx, records, usedImages, digest.NewChecker(planDockerClient, nil))
 	if len(plans) == 0 {
 		return out, nil
 	}
@@ -129,6 +133,7 @@ func (s *Service) ApplyPending(ctx context.Context, opts types.Options) (out *ty
 
 	if len(oldIDToNewRef) > 0 || len(oldRefToNewRef) > 0 {
 		containerResults, restartErr := s.RestartContainersUsingOldImages(ctx, oldIDToNewRef, oldRefToNewRef)
+		markRestartFailedPlansInternal(plans, containerResults)
 		for _, item := range containerResults {
 			s.applyResultCountInternal(out, item)
 			out.Items = append(out.Items, item)
@@ -143,11 +148,45 @@ func (s *Service) ApplyPending(ctx context.Context, opts types.Options) (out *ty
 		if !plans[i].pulled {
 			continue
 		}
+		if plans[i].restartFailed {
+			s.logger.WarnContext(ctx, "keeping image update record after restart failure", "imageRef", plans[i].oldRef, "newRef", plans[i].newRef)
+			continue
+		}
 		if err := s.config.PendingStore.ClearImageUpdateRecord(ctx, plans[i].record); err != nil {
 			s.logger.WarnContext(ctx, "failed to clear image update record", "imageRef", plans[i].oldRef, "error", err)
 		}
 	}
 	return out, nil
+}
+
+func markRestartFailedPlansInternal(plans []updatePlan, results []types.ResourceResult) {
+	failedRefs := restartFailedImageRefsInternal(results)
+	if len(failedRefs) == 0 {
+		return
+	}
+
+	for i := range plans {
+		if !plans[i].pulled {
+			continue
+		}
+		newRef := refs.NormalizeImageUpdateRef(plans[i].newRef)
+		if _, failed := failedRefs[newRef]; failed {
+			plans[i].restartFailed = true
+		}
+	}
+}
+
+func restartFailedImageRefsInternal(results []types.ResourceResult) map[string]struct{} {
+	failedRefs := map[string]struct{}{}
+	for _, result := range results {
+		if result.Status != types.StatusFailed {
+			continue
+		}
+		if newRef := refs.NormalizeImageUpdateRef(result.NewImages["main"]); newRef != "" {
+			failedRefs[newRef] = struct{}{}
+		}
+	}
+	return failedRefs
 }
 
 func planImageUpToDateInternal(ctx context.Context, checker *digest.Checker, plan updatePlan) bool {
@@ -177,7 +216,7 @@ func (s *Service) dockerClientInternal(ctx context.Context) (*client.Client, err
 	return dockerClient, nil
 }
 
-func (s *Service) buildUpdatePlansInternal(ctx context.Context, records []types.ImageUpdateRecord, usedImages map[string]struct{}) []updatePlan {
+func (s *Service) buildUpdatePlansInternal(ctx context.Context, records []types.ImageUpdateRecord, usedImages map[string]struct{}, digestChecker *digest.Checker) []updatePlan {
 	var plans []updatePlan
 	for _, record := range records {
 		if !record.NeedsUpdate() {
@@ -198,8 +237,8 @@ func (s *Service) buildUpdatePlansInternal(ctx context.Context, records []types.
 
 		newRef := record.NewImageRef()
 		var oldIDs []string
-		if dockerClient, err := s.dockerClientInternal(ctx); err == nil {
-			oldIDs, _ = digest.NewChecker(dockerClient, nil).GetImageIDsForRef(ctx, oldRef)
+		if digestChecker != nil {
+			oldIDs, _ = digestChecker.GetImageIDsForRef(ctx, oldRef)
 		}
 		oldIDs = match.AppendImageUpdateRecordIDToOldIDs(oldIDs, record.ID)
 		plans = append(plans, updatePlan{record: record, oldRef: oldRef, newRef: newRef, oldIDs: oldIDs})
