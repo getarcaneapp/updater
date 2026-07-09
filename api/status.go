@@ -33,36 +33,27 @@ func (s *Service) Status() types.Status {
 
 // BeginContainerUpdate marks a container as updating and returns a completion callback.
 func (s *Service) BeginContainerUpdate(containerID string) func() {
-	containerID = strings.TrimSpace(containerID)
-	if containerID == "" {
-		return func() {}
-	}
-
-	s.statusMu.Lock()
-	s.updatingContainers[containerID] = true
-	s.statusMu.Unlock()
-
-	return func() {
-		s.statusMu.Lock()
-		delete(s.updatingContainers, containerID)
-		s.statusMu.Unlock()
-	}
+	return s.beginStatusUpdateInternal(containerID, s.updatingContainers)
 }
 
 // BeginProjectUpdate marks a project as updating and returns a completion callback.
 func (s *Service) BeginProjectUpdate(projectID string) func() {
-	projectID = strings.TrimSpace(projectID)
-	if projectID == "" {
+	return s.beginStatusUpdateInternal(projectID, s.updatingProjects)
+}
+
+func (s *Service) beginStatusUpdateInternal(id string, active map[string]bool) func() {
+	id = strings.TrimSpace(id)
+	if id == "" {
 		return func() {}
 	}
 
 	s.statusMu.Lock()
-	s.updatingProjects[projectID] = true
+	active[id] = true
 	s.statusMu.Unlock()
 
 	return func() {
 		s.statusMu.Lock()
-		delete(s.updatingProjects, projectID)
+		delete(active, id)
 		s.statusMu.Unlock()
 	}
 }
