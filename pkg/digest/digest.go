@@ -182,6 +182,28 @@ func (c *Checker) GetImageIDsForRef(ctx context.Context, ref string) ([]string, 
 	return ids, nil
 }
 
+// RefIDCache memoizes Checker.GetImageIDsForRef lookups by image reference.
+type RefIDCache struct {
+	checker *Checker
+	ids     map[string][]string
+}
+
+// NewRefIDCache creates a memoizing image-ID lookup around checker.
+func NewRefIDCache(checker *Checker) *RefIDCache {
+	return &RefIDCache{checker: checker, ids: map[string][]string{}}
+}
+
+// IDsForRef returns the local image IDs for ref, caching results (including
+// failed lookups, cached as nil) for the lifetime of the cache.
+func (c *RefIDCache) IDsForRef(ctx context.Context, ref string) []string {
+	if ids, ok := c.ids[ref]; ok {
+		return ids
+	}
+	ids, _ := c.checker.GetImageIDsForRef(ctx, ref)
+	c.ids[ref] = ids
+	return ids
+}
+
 func (c *Checker) getLocalDigestInternal(ctx context.Context, imageRef string) (string, error) {
 	inspect, err := c.dockerClient.ImageInspect(ctx, imageRef)
 	if err != nil {

@@ -80,8 +80,7 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Run Golangci-lint
-        uses: golangci/golangci-lint-action@v9.2.1
+        uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.12.2
-          args: --config=.github/.golangci.yml ./...
+          args: ./...
           only-new-issues: false

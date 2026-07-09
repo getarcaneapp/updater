@@ -4,7 +4,7 @@ package api
 import (
 	"context"
 	"log/slog"
-	"sync"
+	"sync/atomic"
 
 	"github.com/moby/moby/api/types/container"
 	"go.getarcane.app/updater/pkg/labels"
@@ -16,9 +16,8 @@ type Service struct {
 	config Config
 	logger *slog.Logger
 
-	statusMu           sync.RWMutex
-	updatingContainers map[string]bool
-	updatingProjects   map[string]bool
+	updatingContainers atomic.Pointer[[]string]
+	updatingProjects   atomic.Pointer[[]string]
 }
 
 type updatePlan struct {
@@ -60,12 +59,13 @@ func newServiceInternal(config Config) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Service{
-		config:             config,
-		logger:             logger,
-		updatingContainers: map[string]bool{},
-		updatingProjects:   map[string]bool{},
+	service := &Service{
+		config: config,
+		logger: logger,
 	}
+	service.updatingContainers.Store(&[]string{})
+	service.updatingProjects.Store(&[]string{})
+	return service
 }
 
 func applyConfigDefaultsInternal(config *Config) {

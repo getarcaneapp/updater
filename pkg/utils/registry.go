@@ -1,4 +1,3 @@
-// Package utils provides shared updater helper utilities.
 package utils
 
 import (

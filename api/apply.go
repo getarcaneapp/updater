@@ -61,89 +61,100 @@ func (s *Service) ApplyPending(ctx context.Context, opts types.Options) (out *ty
 	oldRefToNewRef := map[string]string{}
 
 	for i := range plans {
-		plan := plans[i]
-		item := types.ResourceResult{
-			ResourceID:   plan.oldRef,
-			ResourceType: types.ResourceTypeImage,
-			ResourceName: plan.oldRef,
-			Status:       types.StatusChecked,
-			OldImages:    map[string]string{"main": plan.oldRef},
-			NewImages:    map[string]string{"main": plan.newRef},
-		}
+		plan := &plans[i]
+		item := s.executeUpdatePlanInternal(ctx, digestChecker, plan, opts)
 		out.Checked++
-
-		if opts.DryRun {
-			item.Status = types.StatusSkipped
+		switch item.Status {
+		case types.StatusSkipped:
 			out.Skipped++
-			out.Items = append(out.Items, item)
-			_ = s.recordResultInternal(ctx, item)
-			continue
-		}
-
-		if !opts.Force && planImageUpToDateInternal(ctx, digestChecker, plan) {
-			item.Status = types.StatusSkipped
-			item.Error = "image already up to date"
-			out.Skipped++
-			out.Items = append(out.Items, item)
-			_ = s.recordResultInternal(ctx, item)
-			continue
-		}
-
-		if s.config.ImagePuller == nil {
-			item.Status = types.StatusFailed
-			item.Error = "image puller is required"
+		case types.StatusFailed:
 			out.Failed++
-			out.Items = append(out.Items, item)
-			_ = s.recordResultInternal(ctx, item)
-			continue
-		}
-		if err := s.config.ImagePuller.PullImage(ctx, plan.newRef, io.Discard); err != nil {
-			item.Status = types.StatusFailed
-			item.Error = fmt.Sprintf("pull failed: %v", err)
-			out.Failed++
-			out.Items = append(out.Items, item)
-			_ = s.recordResultInternal(ctx, item)
-			continue
-		}
-
-		if !opts.Force {
-			targetIDs, targetErr := digestChecker.GetImageIDsForRef(ctx, plan.newRef)
-			if targetErr == nil && imageIDsOverlapInternal(plan.oldIDs, targetIDs) {
-				item.Status = types.StatusUpToDate
-				item.Error = "image digest unchanged after pull"
-				plans[i].pulled = true
-				out.Items = append(out.Items, item)
-				_ = s.recordResultInternal(ctx, item)
-				continue
+		case types.StatusUpdated:
+			out.Updated++
+			for _, oldID := range plan.oldIDs {
+				oldIDToNewRef[oldID] = plan.newRef
 			}
+			oldRefToNewRef[plan.oldRef] = plan.newRef
 		}
-
-		item.Status = types.StatusUpdated
-		item.UpdateApplied = true
-		item.UpdateAvailable = true
-		out.Updated++
-		plans[i].pulled = true
-		for _, oldID := range plan.oldIDs {
-			oldIDToNewRef[oldID] = plan.newRef
-		}
-		oldRefToNewRef[plan.oldRef] = plan.newRef
 		out.Items = append(out.Items, item)
 		_ = s.recordResultInternal(ctx, item)
 	}
 
-	if len(oldIDToNewRef) > 0 || len(oldRefToNewRef) > 0 {
-		containerResults, restartErr := s.RestartContainersUsingOldImages(ctx, oldIDToNewRef, oldRefToNewRef)
-		markRestartFailedPlansInternal(plans, containerResults)
-		for _, item := range containerResults {
-			s.applyResultCountInternal(out, item)
-			out.Items = append(out.Items, item)
-			_ = s.recordResultInternal(ctx, item)
-		}
-		if restartErr != nil {
-			return out, restartErr
+	if restartErr := s.restartAfterApplyInternal(ctx, out, plans, oldIDToNewRef, oldRefToNewRef); restartErr != nil {
+		return out, restartErr
+	}
+
+	s.clearAppliedPlanRecordsInternal(ctx, plans)
+	return out, nil
+}
+
+// executeUpdatePlanInternal applies a single pending-update plan: it honors
+// dry-run, skips images that are already current, pulls the new reference,
+// and reports the outcome. It marks plan.pulled once the pull succeeds.
+func (s *Service) executeUpdatePlanInternal(ctx context.Context, digestChecker *digest.Checker, plan *updatePlan, opts types.Options) types.ResourceResult {
+	item := types.ResourceResult{
+		ResourceID:   plan.oldRef,
+		ResourceType: types.ResourceTypeImage,
+		ResourceName: plan.oldRef,
+		Status:       types.StatusChecked,
+		OldImages:    map[string]string{"main": plan.oldRef},
+		NewImages:    map[string]string{"main": plan.newRef},
+	}
+
+	if opts.DryRun {
+		item.Status = types.StatusSkipped
+		return item
+	}
+	if !opts.Force && planImageUpToDateInternal(ctx, digestChecker, *plan) {
+		item.Status = types.StatusSkipped
+		item.Error = "image already up to date"
+		return item
+	}
+	if s.config.ImagePuller == nil {
+		item.Status = types.StatusFailed
+		item.Error = "image puller is required"
+		return item
+	}
+	if err := s.config.ImagePuller.PullImage(ctx, plan.newRef, io.Discard); err != nil {
+		item.Status = types.StatusFailed
+		item.Error = fmt.Sprintf("pull failed: %v", err)
+		return item
+	}
+	plan.pulled = true
+
+	if !opts.Force {
+		targetIDs, targetErr := digestChecker.GetImageIDsForRef(ctx, plan.newRef)
+		if targetErr == nil && imageIDsOverlapInternal(plan.oldIDs, targetIDs) {
+			item.Status = types.StatusUpToDate
+			item.Error = "image digest unchanged after pull"
+			return item
 		}
 	}
 
+	item.Status = types.StatusUpdated
+	item.UpdateApplied = true
+	item.UpdateAvailable = true
+	return item
+}
+
+// restartAfterApplyInternal restarts containers still running the replaced
+// images and folds their results into out, flagging plans whose restart failed
+// so their pending records are kept.
+func (s *Service) restartAfterApplyInternal(ctx context.Context, out *types.Result, plans []updatePlan, oldIDToNewRef, oldRefToNewRef map[string]string) error {
+	if len(oldIDToNewRef) == 0 && len(oldRefToNewRef) == 0 {
+		return nil
+	}
+	containerResults, restartErr := s.RestartContainersUsingOldImages(ctx, oldIDToNewRef, oldRefToNewRef)
+	markRestartFailedPlansInternal(plans, containerResults)
+	for _, item := range containerResults {
+		s.applyResultCountInternal(out, item)
+		out.Items = append(out.Items, item)
+		_ = s.recordResultInternal(ctx, item)
+	}
+	return restartErr
+}
+
+func (s *Service) clearAppliedPlanRecordsInternal(ctx context.Context, plans []updatePlan) {
 	for i := range plans {
 		if !plans[i].pulled {
 			continue
@@ -156,7 +167,6 @@ func (s *Service) ApplyPending(ctx context.Context, opts types.Options) (out *ty
 			s.logger.WarnContext(ctx, "failed to clear image update record", "imageRef", plans[i].oldRef, "error", err)
 		}
 	}
-	return out, nil
 }
 
 func markRestartFailedPlansInternal(plans []updatePlan, results []types.ResourceResult) {

@@ -17,7 +17,7 @@ func (s *Service) triggerSelfUpdateInternal(ctx context.Context, containerID, co
 	if s.config.LabelPolicy.IsAgent(labels) {
 		instanceType = "agent"
 	}
-	_ = s.recordEventInternal(ctx, "self_update_trigger", containerID, containerName, types.ResourceTypeContainer, map[string]any{
+	_ = s.recordEventInternal(ctx, "self_update_trigger", containerID, containerName, map[string]any{
 		"instanceType": instanceType,
 		"newImage":     newImageRef,
 	})
@@ -61,7 +61,9 @@ func (s *Service) notifyInternal(ctx context.Context, containerID, containerName
 	})
 }
 
-func (s *Service) recordEventInternal(ctx context.Context, phase, resourceID, resourceName, resourceType string, metadata map[string]any) error {
+// recordEventInternal records a container-scoped update event; every event the
+// updater emits today concerns a container, so the resource type is fixed.
+func (s *Service) recordEventInternal(ctx context.Context, phase, resourceID, resourceName string, metadata map[string]any) error {
 	if s.config.EventRecorder == nil {
 		return nil
 	}
@@ -70,7 +72,7 @@ func (s *Service) recordEventInternal(ctx context.Context, phase, resourceID, re
 		Severity:     "info",
 		ResourceID:   resourceID,
 		ResourceName: resourceName,
-		ResourceType: resourceType,
+		ResourceType: types.ResourceTypeContainer,
 		Metadata:     metadata,
 	})
 }

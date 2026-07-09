@@ -1,4 +1,3 @@
-// Package utils contains shared Docker-specific helpers used by the updater.
 package utils
 
 import (
