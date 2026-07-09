@@ -231,7 +231,7 @@ func (s *Service) stopAndRemoveStandaloneContainerInternal(ctx context.Context, 
 	if err != nil {
 		return fmt.Errorf("stop: %w", err)
 	}
-	_ = s.recordEventInternal(ctx, "container_stop", cnt.ID, name, types.ResourceTypeContainer, map[string]any{"action": "updater_stop"})
+	_ = s.recordEventInternal(ctx, "container_stop", cnt.ID, name, map[string]any{"action": "updater_stop"})
 
 	removeCtx, cancelRemove := s.opCtxInternal(ctx)
 	_, err = dockerClient.ContainerRemove(removeCtx, cnt.ID, client.ContainerRemoveOptions{})
@@ -239,7 +239,7 @@ func (s *Service) stopAndRemoveStandaloneContainerInternal(ctx context.Context, 
 	if err != nil {
 		return fmt.Errorf("remove: %w", err)
 	}
-	_ = s.recordEventInternal(ctx, "container_delete", cnt.ID, name, types.ResourceTypeContainer, map[string]any{"action": "updater_delete"})
+	_ = s.recordEventInternal(ctx, "container_delete", cnt.ID, name, map[string]any{"action": "updater_delete"})
 	return nil
 }
 
@@ -293,7 +293,7 @@ func (s *Service) createAndStartStandaloneContainerInternal(ctx context.Context,
 	if err != nil {
 		return resp.ID, fmt.Errorf("create: %w", err)
 	}
-	_ = s.recordEventInternal(ctx, "container_create", resp.ID, name, types.ResourceTypeContainer, map[string]any{"action": "updater_create", "newImageID": resp.ID})
+	_ = s.recordEventInternal(ctx, "container_create", resp.ID, name, map[string]any{"action": "updater_create", "newImageID": resp.ID})
 
 	startCtx, cancelStart := s.opCtxInternal(ctx)
 	_, err = dockerClient.ContainerStart(startCtx, resp.ID, client.ContainerStartOptions{})
@@ -308,8 +308,8 @@ func (s *Service) createAndStartStandaloneContainerInternal(ctx context.Context,
 		}
 		s.logger.WarnContext(ctx, "container start returned error but inspect reports running", "containerID", resp.ID, "containerName", name, "error", err)
 	}
-	_ = s.recordEventInternal(ctx, "container_start", resp.ID, name, types.ResourceTypeContainer, map[string]any{"action": "updater_start"})
-	return resp.ID, s.recordEventInternal(ctx, "container_update", resp.ID, name, types.ResourceTypeContainer, map[string]any{"oldContainerID": cnt.ID, "newContainerID": resp.ID, "newImage": newRef})
+	_ = s.recordEventInternal(ctx, "container_start", resp.ID, name, map[string]any{"action": "updater_start"})
+	return resp.ID, s.recordEventInternal(ctx, "container_update", resp.ID, name, map[string]any{"oldContainerID": cnt.ID, "newContainerID": resp.ID, "newImage": newRef})
 }
 
 func createStandaloneContainerInternal(ctx context.Context, dockerClient *client.Client, options client.ContainerCreateOptions, apiVersion string) (client.ContainerCreateResult, error) {
@@ -348,7 +348,7 @@ func (s *Service) removeFailedCreatedContainerInternal(ctx context.Context, dock
 		s.logger.WarnContext(ctx, "failed to remove container after unsuccessful recreate", "containerID", containerID, "containerName", containerName, "error", err)
 		return
 	}
-	_ = s.recordEventInternal(ctx, "container_cleanup", containerID, containerName, types.ResourceTypeContainer, map[string]any{"action": "updater_cleanup_failed_create"})
+	_ = s.recordEventInternal(ctx, "container_cleanup", containerID, containerName, map[string]any{"action": "updater_cleanup_failed_create"})
 }
 
 func (s *Service) rollbackStandaloneContainerInternal(ctx context.Context, dockerClient *client.Client, cnt container.Summary, inspect container.InspectResponse) error {
@@ -361,7 +361,7 @@ func (s *Service) rollbackStandaloneContainerInternal(ctx context.Context, docke
 		s.removeFailedCreatedContainerInternal(ctx, dockerClient, rollbackID, utils.ContainerSummaryName(cnt))
 		return err
 	}
-	_ = s.recordEventInternal(ctx, "container_rollback", rollbackID, utils.ContainerSummaryName(cnt), types.ResourceTypeContainer, map[string]any{
+	_ = s.recordEventInternal(ctx, "container_rollback", rollbackID, utils.ContainerSummaryName(cnt), map[string]any{
 		"action":         "updater_rollback",
 		"oldContainerID": cnt.ID,
 		"rollbackImage":  oldImageID,

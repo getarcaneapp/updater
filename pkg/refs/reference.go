@@ -57,6 +57,19 @@ func NormalizeImageUpdateRef(imageRef string) string {
 	return parts.NormalizedRef
 }
 
+// NormalizeImageUpdateRefMapKeys returns a copy of refToValue keyed by the
+// normalized form of each reference; entries whose keys fail to normalize are
+// dropped.
+func NormalizeImageUpdateRefMapKeys(refToValue map[string]string) map[string]string {
+	out := make(map[string]string, len(refToValue))
+	for imageRef, value := range refToValue {
+		if normalized := NormalizeImageUpdateRef(imageRef); normalized != "" {
+			out[normalized] = value
+		}
+	}
+	return out
+}
+
 // IsImageIDLikeReference reports whether ref is a Docker image ID rather than a pullable tag.
 func IsImageIDLikeReference(ref string) bool {
 	ref = strings.ToLower(strings.TrimSpace(ref))

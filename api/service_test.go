@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -982,16 +984,27 @@ func TestUpdateStandaloneContainerRollsBackAndRemovesDanglingCreateOnStartFailur
 }
 
 func TestUpdateStandaloneContainerRemovesCreatedContainerWhenExtraNetworkConnectTimesOutInternal(t *testing.T) {
+	var operationsMu sync.Mutex
 	var operations []string
 	removedNew := false
+	appendOperation := func(operation string) {
+		operationsMu.Lock()
+		defer operationsMu.Unlock()
+		operations = append(operations, operation)
+	}
+	newContainerRemoved := func() bool {
+		operationsMu.Lock()
+		defer operationsMu.Unlock()
+		return removedNew
+	}
 	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
 		path := dockerAPIPathInternal(r.URL.Path)
 		switch {
 		case r.Method == http.MethodPost && path == "/containers/old-id/stop":
-			operations = append(operations, "stop:old-id")
+			appendOperation("stop:old-id")
 			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodDelete && path == "/containers/old-id":
-			operations = append(operations, "remove:old-id")
+			appendOperation("remove:old-id")
 			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodPost && path == "/containers/create":
 			var body container.Config
@@ -999,15 +1012,15 @@ func TestUpdateStandaloneContainerRemovesCreatedContainerWhenExtraNetworkConnect
 				t.Fatalf("decode create body: %v", err)
 			}
 			if body.Image == "app:2" {
-				operations = append(operations, "create:new")
+				appendOperation("create:new")
 				writeDockerJSONInternal(t, w, map[string]any{"Id": "new-id", "Warnings": []string{}})
 				return
 			}
-			if !removedNew {
+			if !newContainerRemoved() {
 				http.Error(w, "name already in use", http.StatusConflict)
 				return
 			}
-			operations = append(operations, "create:rollback")
+			appendOperation("create:rollback")
 			writeDockerJSONInternal(t, w, map[string]any{"Id": "rollback-id", "Warnings": []string{}})
 		case r.Method == http.MethodPost && path == "/networks/secondary/connect":
 			var body struct {
@@ -1016,7 +1029,7 @@ func TestUpdateStandaloneContainerRemovesCreatedContainerWhenExtraNetworkConnect
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode network connect body: %v", err)
 			}
-			operations = append(operations, "connect:secondary:"+body.Container)
+			appendOperation("connect:secondary:" + body.Container)
 			if body.Container != "new-id" {
 				w.WriteHeader(http.StatusNoContent)
 				return
@@ -1024,11 +1037,13 @@ func TestUpdateStandaloneContainerRemovesCreatedContainerWhenExtraNetworkConnect
 			time.Sleep(50 * time.Millisecond)
 			w.WriteHeader(http.StatusNoContent)
 		case r.Method == http.MethodDelete && path == "/containers/new-id":
+			operationsMu.Lock()
 			removedNew = true
 			operations = append(operations, "remove:new-id")
+			operationsMu.Unlock()
 			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodPost && path == "/containers/rollback-id/start":
-			operations = append(operations, "start:rollback-id")
+			appendOperation("start:rollback-id")
 			w.WriteHeader(http.StatusNoContent)
 		default:
 			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
@@ -1060,7 +1075,10 @@ func TestUpdateStandaloneContainerRemovesCreatedContainerWhenExtraNetworkConnect
 	if !strings.Contains(err.Error(), "rollback succeeded") {
 		t.Fatalf("error = %q, want rollback succeeded detail", err.Error())
 	}
-	assertOperationsInOrderInternal(t, operations, []string{
+	operationsMu.Lock()
+	gotOperations := slices.Clone(operations)
+	operationsMu.Unlock()
+	assertOperationsInOrderInternal(t, gotOperations, []string{
 		"create:new",
 		"connect:secondary:new-id",
 		"remove:new-id",
@@ -1547,6 +1565,96 @@ func TestStatusTracksContainersInternal(t *testing.T) {
 	if status.UpdatingContainers != 0 || len(status.ContainerIDs) != 0 {
 		t.Fatalf("Status() after done = %#v", status)
 	}
+}
+
+func TestStatusSnapshotsRemainConsistentUnderConcurrentUpdatesInternal(t *testing.T) {
+	service := NewService(Config{})
+	containerIDs := []string{"alpha", "beta", "gamma", "delta"}
+	projectIDs := []string{"project-a", "project-b", "project-c"}
+
+	stopPolling := make(chan struct{})
+	errCh := make(chan string, 1)
+	var poller sync.WaitGroup
+	poller.Add(1)
+	go func() {
+		defer poller.Done()
+		for {
+			select {
+			case <-stopPolling:
+				return
+			default:
+			}
+			if message := statusConsistencyErrorInternal(service.Status()); message != "" {
+				select {
+				case errCh <- message:
+				default:
+				}
+				return
+			}
+		}
+	}()
+
+	var workers sync.WaitGroup
+	for workerID := 0; workerID < 16; workerID++ {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for i := 0; i < 200; i++ {
+				endContainer := service.BeginContainerUpdate(containerIDs[(workerID+i)%len(containerIDs)])
+				endProject := service.BeginProjectUpdate(projectIDs[(workerID+i)%len(projectIDs)])
+				if message := statusConsistencyErrorInternal(service.Status()); message != "" {
+					select {
+					case errCh <- message:
+					default:
+					}
+					return
+				}
+				time.Sleep(time.Microsecond)
+				endProject()
+				endContainer()
+			}
+		}()
+	}
+	workers.Wait()
+	close(stopPolling)
+	poller.Wait()
+
+	select {
+	case message := <-errCh:
+		t.Fatal(message)
+	default:
+	}
+}
+
+func statusConsistencyErrorInternal(status types.Status) string {
+	if status.UpdatingContainers != len(status.ContainerIDs) {
+		return "container status count does not match IDs"
+	}
+	if status.UpdatingProjects != len(status.ProjectIDs) {
+		return "project status count does not match IDs"
+	}
+	if !slices.IsSorted(status.ContainerIDs) {
+		return "container status IDs are not sorted"
+	}
+	if !slices.IsSorted(status.ProjectIDs) {
+		return "project status IDs are not sorted"
+	}
+	if hasDuplicateSortedStringInternal(status.ContainerIDs) {
+		return "container status IDs contain duplicates"
+	}
+	if hasDuplicateSortedStringInternal(status.ProjectIDs) {
+		return "project status IDs contain duplicates"
+	}
+	return ""
+}
+
+func hasDuplicateSortedStringInternal(values []string) bool {
+	for i := 1; i < len(values); i++ {
+		if values[i] == values[i-1] {
+			return true
+		}
+	}
+	return false
 }
 
 func TestResolvePullableImageRefInternal(t *testing.T) {

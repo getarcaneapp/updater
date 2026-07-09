@@ -134,7 +134,7 @@ func UpdateImplicitRestart(containers []ContainerWithDeps, markedForRestart map[
 
 func (s *ContainerSorter) visitInternal(c ContainerWithDeps, path []string) error {
 	if s.marked[c.Name] {
-		cycle := append(path, c.Name)
+		cycle := append(slices.Clone(path), c.Name)
 		start := slices.Index(cycle, c.Name)
 		if start >= 0 {
 			cycle = cycle[start:]

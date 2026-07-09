@@ -290,19 +290,19 @@ func extractDigestFromHeadersInternal(header http.Header) string {
 
 func extractRateLimitFromHeadersInternal(header http.Header) (*RateLimitInfo, error) {
 	info := &RateLimitInfo{}
-	if limit, window := parseRateLimitHeaderInternal(header.Get("RateLimit-Limit")); limit != nil {
+	if limit, window := parseRateLimitHeaderInternal(header.Get("Ratelimit-Limit")); limit != nil {
 		info.Limit = limit
 		info.WindowSeconds = window
 		info.Source = registryRateLimitHeaderSourceInternal
 	}
-	if remaining, window := parseRateLimitHeaderInternal(header.Get("RateLimit-Remaining")); remaining != nil {
+	if remaining, window := parseRateLimitHeaderInternal(header.Get("Ratelimit-Remaining")); remaining != nil {
 		info.Remaining = remaining
 		if info.WindowSeconds == nil {
 			info.WindowSeconds = window
 		}
 		info.Source = registryRateLimitHeaderSourceInternal
 	}
-	if used, err := strconv.Atoi(strings.TrimSpace(header.Get("Docker-RateLimit-Used"))); err == nil {
+	if used, err := strconv.Atoi(strings.TrimSpace(header.Get("Docker-Ratelimit-Used"))); err == nil {
 		info.Used = &used
 		if info.Source == "" {
 			info.Source = "docker"

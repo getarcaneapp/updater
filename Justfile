@@ -17,7 +17,7 @@ format target="all":
 
 [group('quality')]
 _lint-go:
-    golangci-lint run -c .github/.golangci.yml ./...
+    golangci-lint run ./...
 
 [group('quality')]
 _lint-all:
