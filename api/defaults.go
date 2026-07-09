@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync/atomic"
 
 	"github.com/moby/moby/client"
 	"go.getarcane.app/updater/pkg/digest"
@@ -16,6 +17,7 @@ import (
 
 type defaultDockerClientProvider struct {
 	options []client.Opt
+	client  atomic.Pointer[client.Client]
 }
 
 type defaultImagePuller struct {
@@ -33,7 +35,7 @@ func NewDefaultService() *Service {
 
 // NewDockerClientProvider returns a Docker client provider that uses the local Docker environment.
 func NewDockerClientProvider(options ...client.Opt) DockerClientProvider {
-	return defaultDockerClientProvider{options: append([]client.Opt{client.FromEnv}, options...)}
+	return &defaultDockerClientProvider{options: append([]client.Opt{client.FromEnv}, options...)}
 }
 
 // NewImagePuller returns an image puller backed by Docker's ImagePull API.
@@ -53,7 +55,23 @@ func newRegistryDigestResolverInternal(httpClient *http.Client) digest.RemoteRes
 	return defaultRegistryDigestResolver{httpClient: httpClient}
 }
 
-func (p defaultDockerClientProvider) DockerClient(ctx context.Context) (*client.Client, error) {
+func (p *defaultDockerClientProvider) DockerClient(ctx context.Context) (*client.Client, error) {
+	if p == nil {
+		return nil, errors.New("docker client provider is nil")
+	}
+	if dockerClient := p.client.Load(); dockerClient != nil {
+		if _, err := dockerClient.Ping(ctx, client.PingOptions{}); err != nil {
+			if p.client.CompareAndSwap(dockerClient, nil) {
+				closeErr := dockerClient.Close()
+				if closeErr != nil {
+					return nil, fmt.Errorf("ping docker daemon: %w", errors.Join(err, closeErr))
+				}
+			}
+			return nil, fmt.Errorf("ping docker daemon: %w", err)
+		}
+		return dockerClient, nil
+	}
+
 	dockerClient, err := client.New(p.options...)
 	if err != nil {
 		return nil, err
@@ -64,7 +82,28 @@ func (p defaultDockerClientProvider) DockerClient(ctx context.Context) (*client.
 		}
 		return nil, fmt.Errorf("ping docker daemon: %w", err)
 	}
-	return dockerClient, nil
+	if p.client.CompareAndSwap(nil, dockerClient) {
+		return dockerClient, nil
+	}
+	winner := p.client.Load()
+	if closeErr := dockerClient.Close(); closeErr != nil {
+		return nil, fmt.Errorf("close unused docker client: %w", closeErr)
+	}
+	if winner == nil {
+		return p.DockerClient(ctx)
+	}
+	return winner, nil
+}
+
+func (p *defaultDockerClientProvider) Close() error {
+	if p == nil {
+		return nil
+	}
+	dockerClient := p.client.Swap(nil)
+	if dockerClient == nil {
+		return nil
+	}
+	return dockerClient.Close()
 }
 
 func (p defaultImagePuller) PullImage(ctx context.Context, imageRef string, progress io.Writer) error {
@@ -72,7 +111,7 @@ func (p defaultImagePuller) PullImage(ctx context.Context, imageRef string, prog
 	if err != nil {
 		return fmt.Errorf("docker connect: %w", err)
 	}
-	pullOptions, err := defaultImagePullOptionsInternal(imageRef)
+	pullOptions, err := defaultImagePullOptionsInternal(ctx, imageRef)
 	if err != nil {
 		return fmt.Errorf("registry auth: %w", err)
 	}
@@ -80,6 +119,7 @@ func (p defaultImagePuller) PullImage(ctx context.Context, imageRef string, prog
 	if err != nil {
 		return err
 	}
+	defer func() { _ = resp.Close() }()
 
 	for msg, err := range resp.JSONMessages(ctx) {
 		if err != nil {
@@ -101,7 +141,7 @@ func (r defaultRegistryDigestResolver) GetImageDigest(ctx context.Context, image
 	if err != nil {
 		return "", err
 	}
-	credential, err := defaultDigestCredentialsInternal(imageRef)
+	credential, err := defaultDigestCredentialsInternal(ctx, imageRef)
 	if err != nil {
 		return "", fmt.Errorf("registry auth: %w", err)
 	}

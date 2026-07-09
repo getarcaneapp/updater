@@ -36,7 +36,7 @@ func TestDefaultImagePullerIgnoresRepositoryEnvAuthInternal(t *testing.T) {
 		}
 	})
 
-	puller := defaultImagePuller{dockerClientProvider: fakeDockerClientProvider{client: dockerClient}}
+	puller := defaultImagePuller{dockerClientProvider: &fakeDockerClientProvider{client: dockerClient}}
 	err := puller.PullImage(context.Background(), "registry.example.com/team/app:1.2.3", io.Discard)
 	if err != nil {
 		t.Fatalf("PullImage() error = %v", err)
@@ -65,7 +65,7 @@ func TestDefaultImagePullerUsesDockerConfigRegistryAuthInternal(t *testing.T) {
 		}
 	})
 
-	puller := defaultImagePuller{dockerClientProvider: fakeDockerClientProvider{client: dockerClient}}
+	puller := defaultImagePuller{dockerClientProvider: &fakeDockerClientProvider{client: dockerClient}}
 	err := puller.PullImage(context.Background(), "registry.example.com/team/app:1.2.3", io.Discard)
 	if err != nil {
 		t.Fatalf("PullImage() error = %v", err)
@@ -97,7 +97,7 @@ func TestDefaultImagePullerRetriesAnonymouslyAfterAuthRejectedInternal(t *testin
 		}
 	})
 
-	puller := defaultImagePuller{dockerClientProvider: fakeDockerClientProvider{client: dockerClient}}
+	puller := defaultImagePuller{dockerClientProvider: &fakeDockerClientProvider{client: dockerClient}}
 	err := puller.PullImage(context.Background(), "registry.example.com/team/app:1.2.3", io.Discard)
 	if err != nil {
 		t.Fatalf("PullImage() error = %v", err)

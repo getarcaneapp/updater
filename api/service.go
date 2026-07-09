@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"sync"
 
@@ -21,11 +22,12 @@ type Service struct {
 }
 
 type updatePlan struct {
-	record types.ImageUpdateRecord
-	oldRef string
-	newRef string
-	oldIDs []string
-	pulled bool
+	record        types.ImageUpdateRecord
+	oldRef        string
+	newRef        string
+	oldIDs        []string
+	pulled        bool
+	restartFailed bool
 }
 
 type restartPlan struct {
@@ -35,6 +37,13 @@ type restartPlan struct {
 	match    string
 	explicit bool
 	implicit bool
+}
+
+func (s *Service) opCtxInternal(ctx context.Context) (context.Context, context.CancelFunc) {
+	if s == nil || s.config.OperationTimeout <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithTimeout(ctx, s.config.OperationTimeout)
 }
 
 // NewService constructs an updater service.

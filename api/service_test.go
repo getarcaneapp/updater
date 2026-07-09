@@ -5,14 +5,17 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/api/types/image"
+	"github.com/moby/moby/api/types/network"
 	"github.com/moby/moby/client"
 	"github.com/opencontainers/go-digest"
 	"go.getarcane.app/updater/pkg/labels"
@@ -22,14 +25,16 @@ import (
 type fakeDockerClientProvider struct {
 	client *client.Client
 	err    error
+	calls  int
 }
 
-func (f fakeDockerClientProvider) DockerClient(ctx context.Context) (*client.Client, error) {
+func (f *fakeDockerClientProvider) DockerClient(ctx context.Context) (*client.Client, error) {
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 	}
+	f.calls++
 	return f.client, f.err
 }
 
@@ -134,6 +139,8 @@ func (r *countingDigestResolver) GetImageDigest(ctx context.Context, imageRef st
 type fakeProjectUpdater struct {
 	projects    map[string]types.ComposeProject
 	updateCalls []string
+	err         error
+	delay       time.Duration
 }
 
 func (f *fakeProjectUpdater) ProjectByComposeName(ctx context.Context, composeName string) (types.ComposeProject, error) {
@@ -149,13 +156,20 @@ func (f *fakeProjectUpdater) ProjectByComposeName(ctx context.Context, composeNa
 }
 
 func (f *fakeProjectUpdater) UpdateServices(ctx context.Context, projectID string, services []string) error {
+	if f.delay > 0 {
+		select {
+		case <-time.After(f.delay):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
 	if ctx != nil {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
 	}
 	f.updateCalls = append(f.updateCalls, projectID+":"+strings.Join(services, ","))
-	return nil
+	return f.err
 }
 
 type fakeSelfUpdater struct {
@@ -170,6 +184,41 @@ func (f *fakeSelfUpdater) TriggerSelfUpdate(ctx context.Context, target types.Se
 	}
 	f.targets = append(f.targets, target)
 	return nil
+}
+
+type fakeEventRecorder struct {
+	events []types.Event
+}
+
+func (f *fakeEventRecorder) RecordEvent(ctx context.Context, event types.Event) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	f.events = append(f.events, event)
+	return nil
+}
+
+type captureLogHandlerInternal struct {
+	records []slog.Record
+}
+
+func (h *captureLogHandlerInternal) Enabled(context.Context, slog.Level) bool {
+	return true
+}
+
+func (h *captureLogHandlerInternal) Handle(_ context.Context, record slog.Record) error {
+	h.records = append(h.records, record.Clone())
+	return nil
+}
+
+func (h *captureLogHandlerInternal) WithAttrs([]slog.Attr) slog.Handler {
+	return h
+}
+
+func (h *captureLogHandlerInternal) WithGroup(string) slog.Handler {
+	return h
 }
 
 type recordingSelfUpdater struct {
@@ -219,9 +268,23 @@ func writeDockerJSONInternal(t *testing.T, w http.ResponseWriter, value any) {
 	}
 }
 
+func closeHTTPConnectionInternal(t *testing.T, w http.ResponseWriter) {
+	t.Helper()
+
+	hijacker, ok := w.(http.Hijacker)
+	if !ok {
+		t.Fatal("response writer does not support hijacking")
+	}
+	conn, _, err := hijacker.Hijack()
+	if err != nil {
+		t.Fatalf("hijack connection: %v", err)
+	}
+	_ = conn.Close()
+}
+
 func TestNewServiceAppliesGenericDockerDefaultsInternal(t *testing.T) {
 	service := NewDefaultService()
-	if _, ok := service.config.DockerClientProvider.(defaultDockerClientProvider); !ok {
+	if _, ok := service.config.DockerClientProvider.(*defaultDockerClientProvider); !ok {
 		t.Fatalf("DockerClientProvider = %T, want built-in provider", service.config.DockerClientProvider)
 	}
 	if _, ok := service.config.ImagePuller.(defaultImagePuller); !ok {
@@ -242,12 +305,12 @@ func TestNewServiceKeepsCustomDockerAdaptersInternal(t *testing.T) {
 	puller := &fakePuller{}
 	store := &fakePendingStore{}
 	service := NewService(Config{
-		DockerClientProvider:   fakeDockerClientProvider{err: errors.New("custom")},
+		DockerClientProvider:   &fakeDockerClientProvider{err: errors.New("custom")},
 		ImagePuller:            puller,
 		PendingStore:           store,
 		RegistryDigestResolver: fakeDigestResolver{},
 	})
-	if _, ok := service.config.DockerClientProvider.(fakeDockerClientProvider); !ok {
+	if _, ok := service.config.DockerClientProvider.(*fakeDockerClientProvider); !ok {
 		t.Fatalf("DockerClientProvider = %T, want custom provider", service.config.DockerClientProvider)
 	}
 	if service.config.ImagePuller != puller {
@@ -347,6 +410,58 @@ func TestDefaultRegistryDigestResolverFetchesDigestInternal(t *testing.T) {
 	}
 }
 
+func TestDefaultDockerClientProviderCachesAndRecreatesAfterPingFailureInternal(t *testing.T) {
+	var pingCalls int
+	failPing := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if dockerAPIPathInternal(r.URL.Path) != "/_ping" {
+			http.Error(w, "unexpected path: "+r.URL.Path, http.StatusNotFound)
+			return
+		}
+		pingCalls++
+		if failPing {
+			http.Error(w, "daemon unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte("OK"))
+	}))
+	defer server.Close()
+
+	provider := NewDockerClientProvider(client.WithHost(server.URL), client.WithAPIVersion("1.41"))
+	first, err := provider.DockerClient(context.Background())
+	if err != nil {
+		t.Fatalf("first DockerClient() error = %v", err)
+	}
+	second, err := provider.DockerClient(context.Background())
+	if err != nil {
+		t.Fatalf("second DockerClient() error = %v", err)
+	}
+	if first != second {
+		t.Fatal("DockerClient() returned different clients before ping failure")
+	}
+
+	failPing = true
+	if _, err := provider.DockerClient(context.Background()); err == nil {
+		t.Fatal("DockerClient() after ping failure returned nil error")
+	}
+	failPing = false
+	third, err := provider.DockerClient(context.Background())
+	if err != nil {
+		t.Fatalf("third DockerClient() error = %v", err)
+	}
+	if third == first {
+		t.Fatal("DockerClient() reused client evicted after ping failure")
+	}
+	if closer, ok := provider.(io.Closer); !ok {
+		t.Fatalf("provider does not implement io.Closer")
+	} else if err := closer.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	if pingCalls < 4 {
+		t.Fatalf("pingCalls = %d, want at least 4", pingCalls)
+	}
+}
+
 func TestApplyPendingDryRunRecordsSkippedImageInternal(t *testing.T) {
 	store := &fakePendingStore{records: []types.ImageUpdateRecord{{
 		ID:         "sha256:old",
@@ -358,7 +473,7 @@ func TestApplyPendingDryRunRecordsSkippedImageInternal(t *testing.T) {
 	recorder := &fakeRunRecorder{}
 	puller := &fakePuller{}
 	service := NewService(Config{
-		DockerClientProvider: fakeDockerClientProvider{err: errors.New("not used in dry run")},
+		DockerClientProvider: &fakeDockerClientProvider{err: errors.New("not used in dry run")},
 		PendingStore:         store,
 		RunRecorder:          recorder,
 		ImagePuller:          puller,
@@ -403,7 +518,7 @@ func TestApplyPendingSkipsUnchangedPulledImageInternal(t *testing.T) {
 		}
 	})
 	service := newServiceInternal(Config{
-		DockerClientProvider: fakeDockerClientProvider{client: dockerClient},
+		DockerClientProvider: &fakeDockerClientProvider{client: dockerClient},
 		PendingStore:         store,
 		ImagePuller:          puller,
 		UsedImageCollector: UsedImageCollectorFunc(func(context.Context) (map[string]struct{}, error) {
@@ -452,7 +567,7 @@ func TestApplyPendingForceBypassesUnchangedPulledImageSkipInternal(t *testing.T)
 		}
 	})
 	service := newServiceInternal(Config{
-		DockerClientProvider: fakeDockerClientProvider{client: dockerClient},
+		DockerClientProvider: &fakeDockerClientProvider{client: dockerClient},
 		PendingStore:         store,
 		ImagePuller:          puller,
 		UsedImageCollector: UsedImageCollectorFunc(func(context.Context) (map[string]struct{}, error) {
@@ -515,7 +630,7 @@ func TestApplyPendingUsesRecordDigestBeforeResolverInternal(t *testing.T) {
 		}
 	})
 	service := newServiceInternal(Config{
-		DockerClientProvider:   fakeDockerClientProvider{client: dockerClient},
+		DockerClientProvider:   &fakeDockerClientProvider{client: dockerClient},
 		PendingStore:           store,
 		ImagePuller:            puller,
 		RegistryDigestResolver: resolver,
@@ -572,7 +687,7 @@ func TestApplyPendingSkipsWhenKnownDigestMatchesAnyLocalRepoDigestInternal(t *te
 		}
 	})
 	service := newServiceInternal(Config{
-		DockerClientProvider:   fakeDockerClientProvider{client: dockerClient},
+		DockerClientProvider:   &fakeDockerClientProvider{client: dockerClient},
 		PendingStore:           store,
 		ImagePuller:            puller,
 		RegistryDigestResolver: resolver,
@@ -599,6 +714,107 @@ func TestApplyPendingSkipsWhenKnownDigestMatchesAnyLocalRepoDigestInternal(t *te
 	}
 	if len(store.cleared) != 0 {
 		t.Fatalf("cleared records = %#v, want none", store.cleared)
+	}
+}
+
+func TestApplyPendingReusesDockerClientWhileBuildingPlansInternal(t *testing.T) {
+	store := &fakePendingStore{records: []types.ImageUpdateRecord{
+		{ID: "sha256:old-one", Repository: "nginx", Tag: "1.27", HasUpdate: true, UpdateType: types.UpdateTypeDigest},
+		{ID: "sha256:old-two", Repository: "redis", Tag: "7", HasUpdate: true, UpdateType: types.UpdateTypeDigest},
+	}}
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		switch dockerAPIPathInternal(r.URL.Path) {
+		case "/images/nginx:1.27/json", "/images/redis:7/json":
+			http.Error(w, "not found", http.StatusNotFound)
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	provider := &fakeDockerClientProvider{client: dockerClient}
+	service := newServiceInternal(Config{
+		DockerClientProvider: provider,
+		PendingStore:         store,
+		ImagePuller:          &fakePuller{err: errors.New("stop before restart")},
+		UsedImageCollector: UsedImageCollectorFunc(func(context.Context) (map[string]struct{}, error) {
+			return map[string]struct{}{
+				"docker.io/library/nginx:1.27": {},
+				"docker.io/library/redis:7":    {},
+			}, nil
+		}),
+	})
+
+	_, _ = service.ApplyPending(context.Background(), types.Options{})
+
+	if provider.calls != 2 {
+		t.Fatalf("DockerClient calls = %d, want 2 total calls independent of record count", provider.calls)
+	}
+}
+
+func TestApplyPendingKeepsPulledRecordWhenRestartFailsInternal(t *testing.T) {
+	store := &fakePendingStore{records: []types.ImageUpdateRecord{{
+		ID:         "sha256:old-app",
+		Repository: "app",
+		Tag:        "1",
+		HasUpdate:  true,
+		UpdateType: types.UpdateTypeDigest,
+	}}}
+	pulled := false
+	puller := &fakePuller{after: func(string) {
+		pulled = true
+	}}
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		path := dockerAPIPathInternal(r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && path == "/images/app:1/json":
+			if pulled {
+				writeDockerJSONInternal(t, w, image.InspectResponse{ID: "sha256:new-app"})
+				return
+			}
+			writeDockerJSONInternal(t, w, image.InspectResponse{ID: "sha256:old-app"})
+		case r.Method == http.MethodGet && path == "/containers/json":
+			writeDockerJSONInternal(t, w, []container.Summary{
+				{ID: "app-id", Names: []string{"/app"}, Image: "app:1", ImageID: "sha256:old-app", State: "running"},
+			})
+		case r.Method == http.MethodGet && path == "/containers/app-id/json":
+			writeDockerJSONInternal(t, w, container.InspectResponse{ID: "app-id", Name: "/app", Image: "sha256:old-app", Config: &container.Config{Image: "app:1"}})
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/stop"):
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete && strings.HasPrefix(path, "/containers/"):
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && path == "/containers/create":
+			writeDockerJSONInternal(t, w, map[string]any{"Id": "new-app-id", "Warnings": []string{}})
+		case r.Method == http.MethodPost && path == "/containers/new-app-id/start":
+			http.Error(w, "start failed", http.StatusInternalServerError)
+		case r.Method == http.MethodPost && path == "/containers/new-app-id/stop":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	service := newServiceInternal(Config{
+		DockerClientProvider: &fakeDockerClientProvider{client: dockerClient},
+		PendingStore:         store,
+		ImagePuller:          puller,
+		UsedImageCollector: UsedImageCollectorFunc(func(context.Context) (map[string]struct{}, error) {
+			return map[string]struct{}{"docker.io/library/app:1": {}}, nil
+		}),
+	})
+
+	got, err := service.ApplyPending(context.Background(), types.Options{})
+	if err != nil {
+		t.Fatalf("ApplyPending() error = %v", err)
+	}
+	if len(store.cleared) != 0 {
+		t.Fatalf("cleared records = %#v, want none after restart failure; items=%#v", store.cleared, got.Items)
+	}
+	foundFailedContainer := false
+	for _, item := range got.Items {
+		if item.ResourceType == types.ResourceTypeContainer && item.Status == types.StatusFailed {
+			foundFailedContainer = true
+		}
+	}
+	if !foundFailedContainer {
+		t.Fatalf("ApplyPending() items = %#v, want failed container result", got.Items)
 	}
 }
 
@@ -658,7 +874,7 @@ func TestRestartContainersUsingOldImagesRestartsDependenciesInWatchtowerOrderInt
 		}
 	})
 	service := newServiceInternal(Config{
-		DockerClientProvider: fakeDockerClientProvider{client: dockerClient},
+		DockerClientProvider: &fakeDockerClientProvider{client: dockerClient},
 	})
 
 	results, err := service.RestartContainersUsingOldImages(context.Background(), map[string]string{"sha256:old-db": "db:2"}, nil)
@@ -681,6 +897,354 @@ func TestRestartContainersUsingOldImagesRestartsDependenciesInWatchtowerOrderInt
 	if statusByName["web"] != types.StatusRestarted {
 		t.Fatalf("web status = %q, want restarted; results=%#v", statusByName["web"], results)
 	}
+}
+
+func TestUpdateStandaloneContainerRollsBackAndRemovesDanglingCreateOnStartFailureInternal(t *testing.T) {
+	var operations []string
+	var createdImages []string
+	recorder := &fakeEventRecorder{}
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		path := dockerAPIPathInternal(r.URL.Path)
+		switch {
+		case r.Method == http.MethodPost && path == "/containers/old-id/stop":
+			operations = append(operations, "stop:old-id")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete && path == "/containers/old-id":
+			operations = append(operations, "remove:old-id")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete && path == "/containers/new-id":
+			operations = append(operations, "remove:new-id")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && path == "/containers/create":
+			var body container.Config
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode create body: %v", err)
+			}
+			createdImages = append(createdImages, body.Image)
+			if len(createdImages) == 1 {
+				operations = append(operations, "create:new")
+				writeDockerJSONInternal(t, w, map[string]any{"Id": "new-id", "Warnings": []string{}})
+				return
+			}
+			operations = append(operations, "create:rollback")
+			writeDockerJSONInternal(t, w, map[string]any{"Id": "rollback-id", "Warnings": []string{}})
+		case r.Method == http.MethodPost && path == "/containers/new-id/start":
+			operations = append(operations, "start:new-id")
+			http.Error(w, "start failed", http.StatusInternalServerError)
+		case r.Method == http.MethodPost && path == "/containers/rollback-id/start":
+			operations = append(operations, "start:rollback-id")
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	service := newServiceInternal(Config{
+		DockerClientProvider: &fakeDockerClientProvider{client: dockerClient},
+		EventRecorder:        recorder,
+	})
+
+	err := service.UpdateStandaloneContainer(context.Background(),
+		container.Summary{ID: "old-id", Names: []string{"/app"}},
+		container.InspectResponse{ID: "old-id", Name: "/app", Image: "sha256:old-image", Config: &container.Config{Image: "app:1"}},
+		"app:2",
+	)
+
+	if err == nil {
+		t.Fatal("UpdateStandaloneContainer() error = nil, want start failure with rollback outcome")
+	}
+	if !strings.Contains(err.Error(), "rollback succeeded") {
+		t.Fatalf("error = %q, want rollback succeeded detail", err.Error())
+	}
+	if len(createdImages) != 2 || createdImages[0] != "app:2" || createdImages[1] != "sha256:old-image" {
+		t.Fatalf("created images = %#v, want new ref then old image ID", createdImages)
+	}
+	assertOperationsInOrderInternal(t, operations, []string{
+		"stop:old-id",
+		"remove:old-id",
+		"create:new",
+		"start:new-id",
+		"remove:new-id",
+		"create:rollback",
+		"start:rollback-id",
+	})
+	var sawCleanup, sawRollback bool
+	for _, event := range recorder.events {
+		if event.Phase == "container_cleanup" {
+			sawCleanup = true
+		}
+		if event.Phase == "container_rollback" {
+			sawRollback = true
+		}
+	}
+	if !sawCleanup || !sawRollback {
+		t.Fatalf("events = %#v, want cleanup and rollback events", recorder.events)
+	}
+}
+
+func TestUpdateStandaloneContainerRemovesCreatedContainerWhenExtraNetworkConnectTimesOutInternal(t *testing.T) {
+	var operations []string
+	removedNew := false
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		path := dockerAPIPathInternal(r.URL.Path)
+		switch {
+		case r.Method == http.MethodPost && path == "/containers/old-id/stop":
+			operations = append(operations, "stop:old-id")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete && path == "/containers/old-id":
+			operations = append(operations, "remove:old-id")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && path == "/containers/create":
+			var body container.Config
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode create body: %v", err)
+			}
+			if body.Image == "app:2" {
+				operations = append(operations, "create:new")
+				writeDockerJSONInternal(t, w, map[string]any{"Id": "new-id", "Warnings": []string{}})
+				return
+			}
+			if !removedNew {
+				http.Error(w, "name already in use", http.StatusConflict)
+				return
+			}
+			operations = append(operations, "create:rollback")
+			writeDockerJSONInternal(t, w, map[string]any{"Id": "rollback-id", "Warnings": []string{}})
+		case r.Method == http.MethodPost && path == "/networks/secondary/connect":
+			var body struct {
+				Container string
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode network connect body: %v", err)
+			}
+			operations = append(operations, "connect:secondary:"+body.Container)
+			if body.Container != "new-id" {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+			w.WriteHeader(http.StatusNoContent)
+		case r.Method == http.MethodDelete && path == "/containers/new-id":
+			removedNew = true
+			operations = append(operations, "remove:new-id")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && path == "/containers/rollback-id/start":
+			operations = append(operations, "start:rollback-id")
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	service := newServiceInternal(Config{
+		DockerClientProvider: &fakeDockerClientProvider{client: dockerClient},
+		OperationTimeout:     10 * time.Millisecond,
+	})
+
+	err := service.UpdateStandaloneContainer(context.Background(),
+		container.Summary{ID: "old-id", Names: []string{"/app"}},
+		container.InspectResponse{
+			ID:     "old-id",
+			Name:   "/app",
+			Image:  "sha256:old-image",
+			Config: &container.Config{Image: "app:1"},
+			NetworkSettings: &container.NetworkSettings{Networks: map[string]*network.EndpointSettings{
+				"primary":   {},
+				"secondary": {},
+			}},
+		},
+		"app:2",
+	)
+
+	if err == nil {
+		t.Fatal("UpdateStandaloneContainer() error = nil, want network timeout with rollback outcome")
+	}
+	if !strings.Contains(err.Error(), "rollback succeeded") {
+		t.Fatalf("error = %q, want rollback succeeded detail", err.Error())
+	}
+	assertOperationsInOrderInternal(t, operations, []string{
+		"create:new",
+		"connect:secondary:new-id",
+		"remove:new-id",
+		"create:rollback",
+		"start:rollback-id",
+	})
+}
+
+func TestUpdateStandaloneContainerTreatsAmbiguousStartErrorAsSuccessWhenInspectRunningInternal(t *testing.T) {
+	var operations []string
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		path := dockerAPIPathInternal(r.URL.Path)
+		switch {
+		case r.Method == http.MethodPost && path == "/containers/old-id/stop":
+			operations = append(operations, "stop:old-id")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete && path == "/containers/old-id":
+			operations = append(operations, "remove:old-id")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && path == "/containers/create":
+			operations = append(operations, "create:"+r.URL.Query().Get("name"))
+			writeDockerJSONInternal(t, w, map[string]any{"Id": "new-id", "Warnings": []string{}})
+		case r.Method == http.MethodPost && path == "/containers/new-id/start":
+			operations = append(operations, "start:new-id")
+			closeHTTPConnectionInternal(t, w)
+		case r.Method == http.MethodGet && path == "/containers/new-id/json":
+			operations = append(operations, "inspect:new-id")
+			writeDockerJSONInternal(t, w, container.InspectResponse{
+				ID:    "new-id",
+				Name:  "/app",
+				Image: "sha256:new-image",
+				State: &container.State{Running: true, Status: container.StateRunning},
+			})
+		case r.Method == http.MethodDelete && path == "/containers/new-id":
+			operations = append(operations, "remove:new-id")
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	service := newServiceInternal(Config{
+		DockerClientProvider: &fakeDockerClientProvider{client: dockerClient},
+	})
+
+	err := service.UpdateStandaloneContainer(context.Background(),
+		container.Summary{ID: "old-id", Names: []string{"/app"}},
+		container.InspectResponse{ID: "old-id", Name: "/app", Image: "sha256:old-image", Config: &container.Config{Image: "app:1"}},
+		"app:2",
+	)
+
+	if err != nil {
+		t.Fatalf("UpdateStandaloneContainer() error = %v, want nil after inspect confirms running", err)
+	}
+	assertOperationsInOrderInternal(t, operations, []string{
+		"start:new-id",
+		"inspect:new-id",
+	})
+	for _, operation := range operations {
+		if operation == "remove:new-id" {
+			t.Fatalf("operations = %#v, did not expect removal after inspect confirms running", operations)
+		}
+	}
+}
+
+func TestUpdateStandaloneContainerRollsBackAmbiguousStartErrorWhenInspectNotRunningInternal(t *testing.T) {
+	var operations []string
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		path := dockerAPIPathInternal(r.URL.Path)
+		switch {
+		case r.Method == http.MethodPost && path == "/containers/old-id/stop":
+			operations = append(operations, "stop:old-id")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete && path == "/containers/old-id":
+			operations = append(operations, "remove:old-id")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete && path == "/containers/new-id":
+			operations = append(operations, "remove:new-id")
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && path == "/containers/create":
+			var body container.Config
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode create body: %v", err)
+			}
+			if body.Image == "app:2" {
+				operations = append(operations, "create:new")
+				writeDockerJSONInternal(t, w, map[string]any{"Id": "new-id", "Warnings": []string{}})
+				return
+			}
+			operations = append(operations, "create:rollback")
+			writeDockerJSONInternal(t, w, map[string]any{"Id": "rollback-id", "Warnings": []string{}})
+		case r.Method == http.MethodPost && path == "/containers/new-id/start":
+			operations = append(operations, "start:new-id")
+			closeHTTPConnectionInternal(t, w)
+		case r.Method == http.MethodGet && path == "/containers/new-id/json":
+			operations = append(operations, "inspect:new-id")
+			writeDockerJSONInternal(t, w, container.InspectResponse{
+				ID:    "new-id",
+				Name:  "/app",
+				Image: "sha256:new-image",
+				State: &container.State{Running: false, Status: container.StateExited},
+			})
+		case r.Method == http.MethodPost && path == "/containers/rollback-id/start":
+			operations = append(operations, "start:rollback-id")
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	service := newServiceInternal(Config{
+		DockerClientProvider: &fakeDockerClientProvider{client: dockerClient},
+	})
+
+	err := service.UpdateStandaloneContainer(context.Background(),
+		container.Summary{ID: "old-id", Names: []string{"/app"}},
+		container.InspectResponse{ID: "old-id", Name: "/app", Image: "sha256:old-image", Config: &container.Config{Image: "app:1"}},
+		"app:2",
+	)
+
+	if err == nil {
+		t.Fatal("UpdateStandaloneContainer() error = nil, want ambiguous start failure with rollback outcome")
+	}
+	if !strings.Contains(err.Error(), "rollback succeeded") {
+		t.Fatalf("error = %q, want rollback succeeded detail", err.Error())
+	}
+	assertOperationsInOrderInternal(t, operations, []string{
+		"start:new-id",
+		"inspect:new-id",
+		"remove:new-id",
+		"create:rollback",
+		"start:rollback-id",
+	})
+}
+
+func TestRestartContainersUsingOldImagesLogsCycleFallbackInternal(t *testing.T) {
+	logs := &captureLogHandlerInternal{}
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		path := dockerAPIPathInternal(r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && path == "/containers/json":
+			writeDockerJSONInternal(t, w, []container.Summary{
+				{ID: "a-id", Names: []string{"/a"}, Image: "a:1", ImageID: "sha256:old-a", Labels: map[string]string{labels.LabelDependsOn: "b"}, State: "running"},
+				{ID: "b-id", Names: []string{"/b"}, Image: "b:1", ImageID: "sha256:old-b", Labels: map[string]string{labels.LabelDependsOn: "a"}, State: "running"},
+			})
+		case r.Method == http.MethodGet && path == "/containers/a-id/json":
+			writeDockerJSONInternal(t, w, container.InspectResponse{ID: "a-id", Name: "/a", Image: "sha256:old-a", Config: &container.Config{Image: "a:1", Labels: map[string]string{labels.LabelDependsOn: "b"}}})
+		case r.Method == http.MethodGet && path == "/containers/b-id/json":
+			writeDockerJSONInternal(t, w, container.InspectResponse{ID: "b-id", Name: "/b", Image: "sha256:old-b", Config: &container.Config{Image: "b:1", Labels: map[string]string{labels.LabelDependsOn: "a"}}})
+		case r.Method == http.MethodGet && path == "/images/a:2/json":
+			writeDockerJSONInternal(t, w, image.InspectResponse{ID: "sha256:new-a"})
+		case r.Method == http.MethodGet && path == "/images/b:2/json":
+			writeDockerJSONInternal(t, w, image.InspectResponse{ID: "sha256:new-b"})
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/stop"):
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodDelete && strings.HasPrefix(path, "/containers/"):
+			w.WriteHeader(http.StatusOK)
+		case r.Method == http.MethodPost && path == "/containers/create":
+			writeDockerJSONInternal(t, w, map[string]any{"Id": "new-" + r.URL.Query().Get("name"), "Warnings": []string{}})
+		case r.Method == http.MethodPost && strings.HasSuffix(path, "/start"):
+			w.WriteHeader(http.StatusNoContent)
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	service := newServiceInternal(Config{
+		DockerClientProvider: &fakeDockerClientProvider{client: dockerClient},
+		Logger:               slog.New(logs),
+	})
+
+	results, err := service.RestartContainersUsingOldImages(context.Background(), map[string]string{
+		"sha256:old-a": "a:2",
+		"sha256:old-b": "b:2",
+	}, nil)
+	if err != nil {
+		t.Fatalf("RestartContainersUsingOldImages() error = %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results = %#v, want both containers processed", results)
+	}
+	for _, record := range logs.records {
+		if record.Message == "container dependency sort failed; restarting in discovery order" {
+			return
+		}
+	}
+	t.Fatalf("log records = %#v, want cycle fallback warning", logs.records)
 }
 
 func TestRestartContainersUsingOldImagesRoutesLegacyArcaneServerThroughSelfUpdaterInternal(t *testing.T) {
@@ -737,7 +1301,7 @@ func TestRestartContainersUsingOldImagesRoutesLegacyArcaneServerThroughSelfUpdat
 		}
 	})
 	service := newServiceInternal(Config{
-		DockerClientProvider: fakeDockerClientProvider{client: dockerClient},
+		DockerClientProvider: &fakeDockerClientProvider{client: dockerClient},
 		ProjectUpdater:       projectUpdater,
 		SelfUpdater:          selfUpdater,
 		LabelPolicy:          labels.DefaultLabelPolicy(),
@@ -817,7 +1381,7 @@ func TestRestartContainersUsingOldImagesSelfContainerIDFiresAfterStandaloneInter
 		}
 	})
 	service := newServiceInternal(Config{
-		DockerClientProvider: fakeDockerClientProvider{client: dockerClient},
+		DockerClientProvider: &fakeDockerClientProvider{client: dockerClient},
 		SelfUpdater:          selfUpdater,
 		SelfContainerID:      "self-id",
 		LabelPolicy:          labels.DefaultLabelPolicy(),
@@ -847,6 +1411,108 @@ func TestRestartContainersUsingOldImagesSelfContainerIDFiresAfterStandaloneInter
 	}
 	if statusByName["app"] != types.StatusUpdated || statusByName["arcane"] != types.StatusUpdated {
 		t.Fatalf("results = %#v, want app and arcane updated", results)
+	}
+}
+
+func TestRestartContainersUsingOldImagesVerifiesComposeServiceAfterProjectErrorInternal(t *testing.T) {
+	projectUpdater := &fakeProjectUpdater{
+		projects: map[string]types.ComposeProject{"app": {ID: "project-app", Name: "app"}},
+		err:      errors.New("compose exited after partial update"),
+	}
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		path := dockerAPIPathInternal(r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && path == "/containers/json":
+			if strings.Contains(r.URL.RawQuery, "label") {
+				writeDockerJSONInternal(t, w, []container.Summary{
+					{ID: "web-new", Names: []string{"/web"}, Image: "app:2", ImageID: "sha256:new-app", State: "running"},
+				})
+				return
+			}
+			writeDockerJSONInternal(t, w, []container.Summary{
+				{
+					ID:      "web-old",
+					Names:   []string{"/web"},
+					Image:   "app:1",
+					ImageID: "sha256:old-app",
+					Labels: map[string]string{
+						"com.docker.compose.project": "app",
+						"com.docker.compose.service": "web",
+					},
+					State: "running",
+				},
+			})
+		case r.Method == http.MethodGet && path == "/containers/web-old/json":
+			writeDockerJSONInternal(t, w, container.InspectResponse{
+				ID:    "web-old",
+				Name:  "/web",
+				Image: "sha256:old-app",
+				Config: &container.Config{
+					Image: "app:1",
+					Labels: map[string]string{
+						"com.docker.compose.project": "app",
+						"com.docker.compose.service": "web",
+					},
+				},
+			})
+		case r.Method == http.MethodGet && path == "/images/app:2/json":
+			writeDockerJSONInternal(t, w, image.InspectResponse{ID: "sha256:new-app"})
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	service := newServiceInternal(Config{
+		DockerClientProvider: &fakeDockerClientProvider{client: dockerClient},
+		ProjectUpdater:       projectUpdater,
+	})
+
+	results, err := service.RestartContainersUsingOldImages(context.Background(), map[string]string{"sha256:old-app": "app:2"}, nil)
+	if err != nil {
+		t.Fatalf("RestartContainersUsingOldImages() error = %v", err)
+	}
+	if len(results) != 1 || results[0].Status != types.StatusUpdated {
+		t.Fatalf("results = %#v, want compose service marked updated after verification", results)
+	}
+	if len(projectUpdater.updateCalls) != 1 {
+		t.Fatalf("project updater calls = %#v, want one call", projectUpdater.updateCalls)
+	}
+}
+
+func TestRestartContainersUsingOldImagesOperationTimeoutCancelsSlowStopInternal(t *testing.T) {
+	stopStarted := make(chan struct{})
+	stopReleased := make(chan struct{})
+	dockerClient := newDockerClientForHandlerInternal(t, func(w http.ResponseWriter, r *http.Request) {
+		path := dockerAPIPathInternal(r.URL.Path)
+		switch {
+		case r.Method == http.MethodGet && path == "/containers/json":
+			writeDockerJSONInternal(t, w, []container.Summary{
+				{ID: "app-id", Names: []string{"/app"}, Image: "app:1", ImageID: "sha256:old-app", State: "running"},
+			})
+		case r.Method == http.MethodGet && path == "/containers/app-id/json":
+			writeDockerJSONInternal(t, w, container.InspectResponse{ID: "app-id", Name: "/app", Image: "sha256:old-app", Config: &container.Config{Image: "app:1"}})
+		case r.Method == http.MethodGet && path == "/images/app:2/json":
+			writeDockerJSONInternal(t, w, image.InspectResponse{ID: "sha256:new-app"})
+		case r.Method == http.MethodPost && path == "/containers/app-id/stop":
+			close(stopStarted)
+			<-r.Context().Done()
+			close(stopReleased)
+		default:
+			http.Error(w, "unexpected path: "+r.Method+" "+r.URL.Path, http.StatusNotFound)
+		}
+	})
+	service := newServiceInternal(Config{
+		DockerClientProvider: &fakeDockerClientProvider{client: dockerClient},
+		OperationTimeout:     10 * time.Millisecond,
+	})
+
+	results, err := service.RestartContainersUsingOldImages(context.Background(), map[string]string{"sha256:old-app": "app:2"}, nil)
+	if err != nil {
+		t.Fatalf("RestartContainersUsingOldImages() error = %v", err)
+	}
+	<-stopStarted
+	<-stopReleased
+	if len(results) != 1 || results[0].Status != types.StatusFailed || !strings.Contains(results[0].Error, "context deadline exceeded") {
+		t.Fatalf("results = %#v, want failed stop due to timeout", results)
 	}
 }
 
@@ -904,7 +1570,7 @@ func TestResolvePullableImageRefInternal(t *testing.T) {
 func TestServiceFallsBackToStandaloneWhenComposeProjectUnresolvedInternal(t *testing.T) {
 	projectUpdater := &fakeProjectUpdater{projects: map[string]types.ComposeProject{}}
 	service := NewService(Config{
-		DockerClientProvider: fakeDockerClientProvider{err: errors.New("no docker in test")},
+		DockerClientProvider: &fakeDockerClientProvider{err: errors.New("no docker in test")},
 		ProjectUpdater:       projectUpdater,
 	})
 	err := service.updateComposeOrStandaloneInternal(context.Background(), container.Summary{

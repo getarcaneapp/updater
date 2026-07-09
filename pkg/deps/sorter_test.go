@@ -32,3 +32,18 @@ func TestUpdateImplicitRestartInternal(t *testing.T) {
 		t.Fatal("web was not marked for restart")
 	}
 }
+
+func TestContainerSorterReportsCyclePathInternal(t *testing.T) {
+	sorter := NewContainerSorter([]ContainerWithDeps{
+		{Name: "a", DependsOn: []string{"b"}},
+		{Name: "b", DependsOn: []string{"a"}},
+	})
+
+	_, err := sorter.Sort()
+	if err == nil {
+		t.Fatal("Sort() error = nil, want circular dependency")
+	}
+	if got, want := err.Error(), "circular dependency detected: a -> b -> a"; got != want {
+		t.Fatalf("Sort() error = %q, want %q", got, want)
+	}
+}

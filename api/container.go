@@ -161,8 +161,15 @@ func (s *Service) UpdateStandaloneContainer(ctx context.Context, cnt container.S
 	if err := s.stopAndRemoveStandaloneContainerInternal(ctx, dockerClient, cnt, inspect); err != nil {
 		return err
 	}
-	_, err = s.createAndStartStandaloneContainerInternal(ctx, dockerClient, cnt, inspect, newRef)
-	return err
+	createdID, err := s.createAndStartStandaloneContainerInternal(ctx, dockerClient, cnt, inspect, newRef)
+	if err == nil {
+		return nil
+	}
+	s.removeFailedCreatedContainerInternal(ctx, dockerClient, createdID, utils.ContainerSummaryName(cnt))
+	if rollbackErr := s.rollbackStandaloneContainerInternal(ctx, dockerClient, cnt, inspect); rollbackErr != nil {
+		return fmt.Errorf("%w; rollback failed: %w", err, rollbackErr)
+	}
+	return fmt.Errorf("%w; rollback succeeded", err)
 }
 
 func (s *Service) validateStandaloneContainerUpdateInternal(labels map[string]string) error {
@@ -179,12 +186,18 @@ func (s *Service) stopAndRemoveStandaloneContainerInternal(ctx context.Context, 
 	if signal := s.config.LabelPolicy.StopSignal(labels); signal != "" {
 		stopOptions.Signal = signal
 	}
-	if _, err := dockerClient.ContainerStop(ctx, cnt.ID, stopOptions); err != nil {
+	stopCtx, cancelStop := s.opCtxInternal(ctx)
+	_, err := dockerClient.ContainerStop(stopCtx, cnt.ID, stopOptions)
+	cancelStop()
+	if err != nil {
 		return fmt.Errorf("stop: %w", err)
 	}
 	_ = s.recordEventInternal(ctx, "container_stop", cnt.ID, name, types.ResourceTypeContainer, map[string]any{"action": "updater_stop"})
 
-	if _, err := dockerClient.ContainerRemove(ctx, cnt.ID, client.ContainerRemoveOptions{}); err != nil {
+	removeCtx, cancelRemove := s.opCtxInternal(ctx)
+	_, err = dockerClient.ContainerRemove(removeCtx, cnt.ID, client.ContainerRemoveOptions{})
+	cancelRemove()
+	if err != nil {
 		return fmt.Errorf("remove: %w", err)
 	}
 	_ = s.recordEventInternal(ctx, "container_delete", cnt.ID, name, types.ResourceTypeContainer, map[string]any{"action": "updater_delete"})
@@ -230,22 +243,91 @@ func (s *Service) createAndStartStandaloneContainerInternal(ctx context.Context,
 	apiVersion := utils.DetectAPIVersion(ctx, dockerClient)
 	networkingConfig := buildRecreateNetworkingConfigInternal(networkMode, inspect.NetworkSettings, apiVersion)
 	containerName := strings.TrimPrefix(inspect.Name, "/")
-	resp, err := utils.ContainerCreateWithCompatibilityForAPIVersion(ctx, dockerClient, client.ContainerCreateOptions{
+	createCtx, cancelCreate := s.opCtxInternal(ctx)
+	resp, err := createStandaloneContainerInternal(createCtx, dockerClient, client.ContainerCreateOptions{
 		Config:           cfg,
 		HostConfig:       hostConfig,
 		NetworkingConfig: networkingConfig,
 		Name:             containerName,
 	}, apiVersion)
+	cancelCreate()
 	if err != nil {
-		return "", fmt.Errorf("create: %w", err)
+		return resp.ID, fmt.Errorf("create: %w", err)
 	}
 	_ = s.recordEventInternal(ctx, "container_create", resp.ID, name, types.ResourceTypeContainer, map[string]any{"action": "updater_create", "newImageID": resp.ID})
 
-	if _, err := dockerClient.ContainerStart(ctx, resp.ID, client.ContainerStartOptions{}); err != nil {
-		return resp.ID, fmt.Errorf("start: %w", err)
+	startCtx, cancelStart := s.opCtxInternal(ctx)
+	_, err = dockerClient.ContainerStart(startCtx, resp.ID, client.ContainerStartOptions{})
+	cancelStart()
+	if err != nil {
+		running, inspectErr := containerRunningInternal(ctx, dockerClient, resp.ID)
+		if inspectErr != nil {
+			return resp.ID, fmt.Errorf("start: %w; inspect after start error: %w", err, inspectErr)
+		}
+		if !running {
+			return resp.ID, fmt.Errorf("start: %w", err)
+		}
+		s.logger.WarnContext(ctx, "container start returned error but inspect reports running", "containerID", resp.ID, "containerName", name, "error", err)
 	}
 	_ = s.recordEventInternal(ctx, "container_start", resp.ID, name, types.ResourceTypeContainer, map[string]any{"action": "updater_start"})
 	return resp.ID, s.recordEventInternal(ctx, "container_update", resp.ID, name, types.ResourceTypeContainer, map[string]any{"oldContainerID": cnt.ID, "newContainerID": resp.ID, "newImage": newRef})
+}
+
+func createStandaloneContainerInternal(ctx context.Context, dockerClient *client.Client, options client.ContainerCreateOptions, apiVersion string) (client.ContainerCreateResult, error) {
+	adjustedOptions, extraEndpoints := utils.PrepareContainerCreateOptionsForAPI(options, apiVersion)
+	result, err := dockerClient.ContainerCreate(ctx, adjustedOptions)
+	if err != nil {
+		return client.ContainerCreateResult{}, err
+	}
+	if len(extraEndpoints) == 0 {
+		return result, nil
+	}
+	if err := utils.ConnectContainerExtraNetworksForAPI(ctx, dockerClient, result.ID, extraEndpoints); err != nil {
+		return result, err
+	}
+	return result, nil
+}
+
+func containerRunningInternal(ctx context.Context, dockerClient *client.Client, containerID string) (bool, error) {
+	inspectResult, err := utils.ContainerInspectWithCompatibility(ctx, dockerClient, containerID, client.ContainerInspectOptions{})
+	if err != nil {
+		return false, err
+	}
+	state := inspectResult.Container.State
+	return state != nil && state.Running, nil
+}
+
+func (s *Service) removeFailedCreatedContainerInternal(ctx context.Context, dockerClient *client.Client, containerID, containerName string) {
+	containerID = strings.TrimSpace(containerID)
+	if containerID == "" {
+		return
+	}
+	removeCtx, cancelRemove := s.opCtxInternal(ctx)
+	_, err := dockerClient.ContainerRemove(removeCtx, containerID, client.ContainerRemoveOptions{Force: true})
+	cancelRemove()
+	if err != nil {
+		s.logger.WarnContext(ctx, "failed to remove container after unsuccessful recreate", "containerID", containerID, "containerName", containerName, "error", err)
+		return
+	}
+	_ = s.recordEventInternal(ctx, "container_cleanup", containerID, containerName, types.ResourceTypeContainer, map[string]any{"action": "updater_cleanup_failed_create"})
+}
+
+func (s *Service) rollbackStandaloneContainerInternal(ctx context.Context, dockerClient *client.Client, cnt container.Summary, inspect container.InspectResponse) error {
+	oldImageID := strings.TrimSpace(inspect.Image)
+	if oldImageID == "" {
+		return errors.New("old image ID unavailable")
+	}
+	rollbackID, err := s.createAndStartStandaloneContainerInternal(ctx, dockerClient, cnt, inspect, oldImageID)
+	if err != nil {
+		s.removeFailedCreatedContainerInternal(ctx, dockerClient, rollbackID, utils.ContainerSummaryName(cnt))
+		return err
+	}
+	_ = s.recordEventInternal(ctx, "container_rollback", rollbackID, utils.ContainerSummaryName(cnt), types.ResourceTypeContainer, map[string]any{
+		"action":         "updater_rollback",
+		"oldContainerID": cnt.ID,
+		"rollbackImage":  oldImageID,
+	})
+	return nil
 }
 
 // ResolvePullableImageRef chooses the best pullable image reference for a container.

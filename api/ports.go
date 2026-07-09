@@ -4,13 +4,16 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"time"
 
 	"github.com/moby/moby/client"
 	"go.getarcane.app/updater/pkg/digest"
 	"go.getarcane.app/updater/types"
 )
 
-// DockerClientProvider provides Docker clients.
+// DockerClientProvider provides Docker clients. The provider owns the returned
+// client's lifecycle; Service never closes returned clients. Providers may
+// return the same client across calls.
 type DockerClientProvider interface {
 	DockerClient(ctx context.Context) (*client.Client, error)
 }
@@ -89,5 +92,8 @@ type Config struct {
 	// through the SelfUpdater even if its labels do not mark it as a
 	// self-update target.
 	SelfContainerID string
-	Logger          *slog.Logger
+	// OperationTimeout optionally bounds individual Docker mutation operations
+	// and compose project updates. Zero leaves caller context deadlines unchanged.
+	OperationTimeout time.Duration
+	Logger           *slog.Logger
 }
