@@ -115,6 +115,7 @@ func (s *Service) UpdateContainer(ctx context.Context, containerID string, opts 
 		out.Items = append(out.Items, item)
 		out.Checked = 1
 		out.Skipped++
+		s.clearPendingRecordInternal(ctx, normalizedRef)
 		return out, nil
 	}
 
@@ -129,6 +130,7 @@ func (s *Service) UpdateContainer(ctx context.Context, containerID string, opts 
 		out.Items = append(out.Items, item)
 		out.Checked = 1
 		out.Updated++
+		s.clearPendingRecordInternal(ctx, normalizedRef)
 		return out, nil
 	}
 
@@ -141,9 +143,42 @@ func (s *Service) UpdateContainer(ctx context.Context, containerID string, opts 
 		out.Items = append(out.Items, item)
 		out.Updated++
 		_ = s.notifyInternal(ctx, target.ID, name, imageRef, inspect.Image, normalizedRef)
+		s.clearPendingRecordInternal(ctx, normalizedRef)
 	}
 	out.Checked = 1
 	return out, nil
+}
+
+// clearPendingRecordInternal clears the pending update record for an applied
+// image ref through the same PendingStore seam ApplyPending uses — a
+// single-container update must not leave its "update available" record
+// behind, or the update keeps counting as pending. Only records whose
+// NewImageRef matches the applied ref are cleared: a tag-update record
+// (e.g. nginx:1.27 -> 1.28) stays pending when only the old tag was
+// re-pulled. The records are looked up
+// and cleared as stored (ID and all) rather than reconstructed, because
+// stores key by ID when one is present.
+func (s *Service) clearPendingRecordInternal(ctx context.Context, imageRef string) {
+	if s.config.PendingStore == nil {
+		return
+	}
+	normalized := refs.NormalizeImageUpdateRef(imageRef)
+	if normalized == "" {
+		return
+	}
+	records, err := s.config.PendingStore.PendingImageUpdates(ctx)
+	if err != nil {
+		s.logger.WarnContext(ctx, "failed to load pending records to clear applied update", "imageRef", imageRef, "error", err)
+		return
+	}
+	for _, record := range records {
+		if refs.NormalizeImageUpdateRef(record.NewImageRef()) != normalized {
+			continue
+		}
+		if err := s.config.PendingStore.ClearImageUpdateRecord(ctx, record); err != nil {
+			s.logger.WarnContext(ctx, "failed to clear applied update record", "imageRef", imageRef, "error", err)
+		}
+	}
 }
 
 // UpdateStandaloneContainer recreates a non-compose container with newRef.
