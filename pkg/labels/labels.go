@@ -67,20 +67,16 @@ func IsArcaneAgentContainer(labels map[string]string) bool {
 
 // IsUpdateDisabled reports whether labels opt out of updates.
 func IsUpdateDisabled(labels map[string]string) bool {
-	if labels == nil {
+	value, ok := lookupLabelInternal(labels, LabelUpdater)
+	if !ok {
 		return false
 	}
-	for key, value := range labels {
-		if strings.EqualFold(key, LabelUpdater) {
-			switch strings.TrimSpace(strings.ToLower(value)) {
-			case "false", "0", "no", "off":
-				return true
-			default:
-				return false
-			}
-		}
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "false", "0", "no", "off":
+		return true
+	default:
+		return false
 	}
-	return false
 }
 
 // IsSwarmTask reports whether labels identify a Docker Swarm task.
@@ -90,39 +86,30 @@ func IsSwarmTask(labels map[string]string) bool {
 
 // GetStopSignal returns a custom stop signal from labels.
 func GetStopSignal(labels map[string]string) string {
-	if labels == nil {
+	value, ok := lookupLabelInternal(labels, LabelStopSignal)
+	if !ok {
 		return ""
 	}
-	for key, value := range labels {
-		if strings.EqualFold(key, LabelStopSignal) {
-			return strings.TrimSpace(strings.ToUpper(value))
-		}
-	}
-	return ""
+	return strings.TrimSpace(strings.ToUpper(value))
 }
 
 func hasTruthyLabelInternal(labels map[string]string, target string) bool {
-	if labels == nil {
-		return false
-	}
-	for key, value := range labels {
-		if strings.EqualFold(key, target) && isTruthyLabelValueInternal(value) {
-			return true
-		}
-	}
-	return false
+	value, ok := lookupLabelInternal(labels, target)
+	return ok && isTruthyLabelValueInternal(value)
 }
 
 func hasNonEmptyLabelInternal(labels map[string]string, target string) bool {
-	if labels == nil {
-		return false
-	}
+	value, ok := lookupLabelInternal(labels, target)
+	return ok && strings.TrimSpace(value) != ""
+}
+
+func lookupLabelInternal(labels map[string]string, target string) (string, bool) {
 	for key, value := range labels {
-		if strings.EqualFold(key, target) && strings.TrimSpace(value) != "" {
-			return true
+		if strings.EqualFold(key, target) {
+			return value, true
 		}
 	}
-	return false
+	return "", false
 }
 
 func isTruthyLabelValueInternal(value string) bool {

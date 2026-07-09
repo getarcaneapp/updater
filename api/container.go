@@ -196,6 +196,10 @@ func (s *Service) UpdateStandaloneContainer(ctx context.Context, cnt container.S
 	if err := s.stopAndRemoveStandaloneContainerInternal(ctx, dockerClient, cnt, inspect); err != nil {
 		return err
 	}
+	return s.createStartOrRollbackInternal(ctx, dockerClient, cnt, inspect, newRef)
+}
+
+func (s *Service) createStartOrRollbackInternal(ctx context.Context, dockerClient *client.Client, cnt container.Summary, inspect container.InspectResponse, newRef string) error {
 	createdID, err := s.createAndStartStandaloneContainerInternal(ctx, dockerClient, cnt, inspect, newRef)
 	if err == nil {
 		return nil

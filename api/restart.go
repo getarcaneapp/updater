@@ -157,14 +157,7 @@ func (s *Service) RestartContainersUsingOldImages(ctx context.Context, oldIDToNe
 			plan.inspect = new(inspectResult.Container)
 		}
 
-		res := types.ResourceResult{
-			ResourceID:   plan.cnt.ID,
-			ResourceName: candidate.Name,
-			ResourceType: types.ResourceTypeContainer,
-			Status:       types.StatusChecked,
-			OldImages:    map[string]string{"main": plan.match},
-			NewImages:    map[string]string{"main": refs.NormalizeImageUpdateRef(plan.newRef)},
-		}
+		res := standaloneRestartResultInternal(candidate, plan)
 		if plan.newRef == "" {
 			res.Status = types.StatusSkipped
 			res.Error = "no matching updated image"
@@ -293,15 +286,9 @@ func (s *Service) updateStandaloneRestartCandidatesInternal(ctx context.Context,
 			continue
 		}
 
-		createdID, err := s.createAndStartStandaloneContainerInternal(ctx, dockerClient, plan.cnt, *plan.inspect, plan.newRef)
-		if err != nil {
+		if err := s.createStartOrRollbackInternal(ctx, dockerClient, plan.cnt, *plan.inspect, plan.newRef); err != nil {
 			result.Status = types.StatusFailed
-			s.removeFailedCreatedContainerInternal(ctx, dockerClient, createdID, candidate.Name)
-			if rollbackErr := s.rollbackStandaloneContainerInternal(ctx, dockerClient, plan.cnt, *plan.inspect); rollbackErr != nil {
-				result.Error = fmt.Sprintf("%v; rollback failed: %v", err, rollbackErr)
-			} else {
-				result.Error = fmt.Sprintf("%v; rollback succeeded", err)
-			}
+			result.Error = err.Error()
 			resultsByName[candidate.Name] = result
 			continue
 		}

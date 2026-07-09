@@ -78,23 +78,11 @@ func FetchRegistryRateLimit(ctx context.Context, registryHost, repository, tag s
 	requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	resp, err := manifestRequestInternal(requestCtx, httpClient, http.MethodHead, registryHost, repository, tag, basicAuthHeaderForCredentialInternal(credential))
+	header, err := authorizedManifestHeadersInternal(requestCtx, httpClient, http.MethodHead, registryHost, repository, tag, credential)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		challenge := resp.Header.Get("WWW-Authenticate")
-		if challenge == "" {
-			return nil, fmt.Errorf("manifest request failed with status: %d", resp.StatusCode)
-		}
-		return fetchRateLimitWithTokenAuthInternal(requestCtx, httpClient, registryHost, repository, tag, challenge, credential)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("manifest request failed with status: %d", resp.StatusCode)
-	}
-	return extractRateLimitFromHeadersInternal(resp.Header)
+	return extractRateLimitFromHeadersInternal(header)
 }
 
 // FetchDigest fetches the manifest digest for a registry image reference.
@@ -106,82 +94,55 @@ func FetchDigest(ctx context.Context, registryHost, repository, tag string, cred
 	requestCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	resp, err := manifestRequestInternal(requestCtx, httpClient, http.MethodGet, registryHost, repository, tag, basicAuthHeaderForCredentialInternal(credential))
+	header, err := authorizedManifestHeadersInternal(requestCtx, httpClient, http.MethodGet, registryHost, repository, tag, credential)
 	if err != nil {
 		return "", err
 	}
-	defer func() { _ = resp.Body.Close() }()
 
+	digest := extractDigestFromHeadersInternal(header)
+	if digest == "" {
+		return "", errors.New("no digest header found in response")
+	}
+	return digest, nil
+}
+
+func authorizedManifestHeadersInternal(ctx context.Context, httpClient *http.Client, method, registryHost, repository, tag string, credential *Credentials) (http.Header, error) {
+	resp, err := manifestRequestInternal(ctx, httpClient, method, registryHost, repository, tag, basicAuthHeaderForCredentialInternal(credential))
+	if err != nil {
+		return nil, err
+	}
 	if resp.StatusCode == http.StatusUnauthorized {
 		challenge := resp.Header.Get("WWW-Authenticate")
+		_ = resp.Body.Close()
 		if challenge == "" {
-			return "", fmt.Errorf("manifest request failed with status: %d", resp.StatusCode)
+			return nil, fmt.Errorf("manifest request failed with status: %d", resp.StatusCode)
 		}
-		return fetchWithTokenAuthInternal(requestCtx, httpClient, registryHost, repository, tag, challenge, credential)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("manifest request failed with status: %d", resp.StatusCode)
-	}
-
-	digest := extractDigestFromHeadersInternal(resp.Header)
-	if digest == "" {
-		return "", errors.New("no digest header found in response")
-	}
-	return digest, nil
-}
-
-func fetchRateLimitWithTokenAuthInternal(ctx context.Context, httpClient *http.Client, registryHost, repository, tag, challenge string, credential *Credentials) (*RateLimitInfo, error) {
-	realm, service := parseWWWAuthInternal(challenge)
-	if realm == "" {
-		return nil, errors.New("no auth realm found")
-	}
-	if err := validateAuthRealmInternal(registryHost, realm); err != nil {
-		return nil, err
-	}
-
-	token, err := fetchRegistryTokenInternal(ctx, httpClient, realm, service, repository, credential)
-	if err != nil {
-		return nil, err
-	}
-
-	resp, err := manifestRequestInternal(ctx, httpClient, http.MethodHead, registryHost, repository, tag, token)
-	if err != nil {
-		return nil, err
+		realm, service := parseWWWAuthInternal(challenge)
+		if realm == "" {
+			return nil, errors.New("no auth realm found")
+		}
+		if err := validateAuthRealmInternal(registryHost, realm); err != nil {
+			return nil, err
+		}
+		token, err := fetchRegistryTokenInternal(ctx, httpClient, realm, service, repository, credential)
+		if err != nil {
+			return nil, err
+		}
+		resp, err = manifestRequestInternal(ctx, httpClient, method, registryHost, repository, tag, token)
+		if err != nil {
+			return nil, err
+		}
+		defer func() { _ = resp.Body.Close() }()
+		if resp.StatusCode != http.StatusOK {
+			return nil, fmt.Errorf("authenticated manifest request failed with status: %d", resp.StatusCode)
+		}
+		return resp.Header, nil
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("authenticated manifest request failed with status: %d", resp.StatusCode)
+		return nil, fmt.Errorf("manifest request failed with status: %d", resp.StatusCode)
 	}
-	return extractRateLimitFromHeadersInternal(resp.Header)
-}
-
-func fetchWithTokenAuthInternal(ctx context.Context, httpClient *http.Client, registryHost, repository, tag, challenge string, credential *Credentials) (string, error) {
-	realm, service := parseWWWAuthInternal(challenge)
-	if realm == "" {
-		return "", errors.New("no auth realm found")
-	}
-	if err := validateAuthRealmInternal(registryHost, realm); err != nil {
-		return "", err
-	}
-
-	token, err := fetchRegistryTokenInternal(ctx, httpClient, realm, service, repository, credential)
-	if err != nil {
-		return "", err
-	}
-
-	resp, err := manifestRequestInternal(ctx, httpClient, http.MethodGet, registryHost, repository, tag, token)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("authenticated manifest request failed with status: %d", resp.StatusCode)
-	}
-	digest := extractDigestFromHeadersInternal(resp.Header)
-	if digest == "" {
-		return "", errors.New("no digest header found in response")
-	}
-	return digest, nil
+	return resp.Header, nil
 }
 
 func manifestRequestInternal(ctx context.Context, httpClient *http.Client, method, registryHost, repository, tag, authHeader string) (*http.Response, error) {
