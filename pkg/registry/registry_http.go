@@ -3,7 +3,7 @@ package registry
 import (
 	"context"
 	"encoding/base64"
-	"encoding/json"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -204,7 +204,7 @@ func fetchRegistryTokenInternal(ctx context.Context, httpClient *http.Client, au
 		Token       string `json:"token"`
 		AccessToken string `json:"access_token"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+	if err := json.UnmarshalRead(resp.Body, &tokenResp); err != nil {
 		return "", err
 	}
 	token := strings.TrimSpace(tokenResp.Token)
