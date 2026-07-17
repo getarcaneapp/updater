@@ -2,7 +2,7 @@ package api
 
 import (
 	"context"
-	"encoding/json"
+	json "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -128,9 +128,13 @@ func (p defaultImagePuller) PullImage(ctx context.Context, imageRef string, prog
 		if progress == nil {
 			continue
 		}
-		if err := json.NewEncoder(progress).Encode(msg); err != nil {
+		if err := json.MarshalWrite(progress, msg); err != nil {
 			_ = resp.Close()
 			return fmt.Errorf("write pull progress: %w", err)
+		}
+		if _, err := io.WriteString(progress, "\n"); err != nil {
+			_ = resp.Close()
+			return fmt.Errorf("terminate pull progress: %w", err)
 		}
 	}
 	return nil
