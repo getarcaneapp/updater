@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 
 	"github.com/moby/moby/client"
 	oci "github.com/opencontainers/go-digest"
+	"github.com/samber/hot"
 	"go.getarcane.app/updater/pkg/refs"
 )
 
@@ -185,22 +187,29 @@ func (c *Checker) GetImageIDsForRef(ctx context.Context, ref string) ([]string, 
 // RefIDCache memoizes Checker.GetImageIDsForRef lookups by image reference.
 type RefIDCache struct {
 	checker *Checker
-	ids     map[string][]string
+	ids     *hot.HotCache[string, []string]
 }
 
 // NewRefIDCache creates a memoizing image-ID lookup around checker.
 func NewRefIDCache(checker *Checker) *RefIDCache {
-	return &RefIDCache{checker: checker, ids: map[string][]string{}}
+	return &RefIDCache{
+		checker: checker,
+		// This cache is a per-scan snapshot; eviction could make repeated
+		// lookups for one ref observe different Docker image state.
+		ids: hot.NewHotCache[string, []string](hot.LRU, math.MaxInt).
+			WithoutLocking().
+			Build(),
+	}
 }
 
 // IDsForRef returns the local image IDs for ref, caching results (including
 // failed lookups, cached as nil) for the lifetime of the cache.
 func (c *RefIDCache) IDsForRef(ctx context.Context, ref string) []string {
-	if ids, ok := c.ids[ref]; ok {
+	if ids, ok := c.ids.Peek(ref); ok {
 		return ids
 	}
 	ids, _ := c.checker.GetImageIDsForRef(ctx, ref)
-	c.ids[ref] = ids
+	c.ids.Set(ref, ids)
 	return ids
 }
 
