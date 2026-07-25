@@ -10,71 +10,148 @@ Portable Docker auto-update orchestration for Go applications.
 
 </div>
 
-Arcane Updater is the standalone Go module behind Arcane's Docker auto-updater flow. It provides the update engine, Docker client integration, image pulling, registry digest checks, Docker image matching, Compose-aware recreation, self-update routing, and reusable helper packages.
+Arcane Updater is the standalone Go module behind Arcane's Docker auto-updater. It pulls newer images, recreates the containers running them, and restarts whatever depended on those containers — with Compose awareness, registry digest checks, and a path for containers that must update themselves.
 
-The module can be used directly in non-Arcane Go applications. Arcane-specific persistence, activity, and notification behavior is still adapter-driven, but Docker access and ordinary container updates work out of the box.
+It works out of the box against the local Docker environment. Persistence, notifications, and self-upgrade behavior stay adapter-driven, so a host application plugs in only the parts it owns.
 
-## How it works
+> [!IMPORTANT]
+> This module is in early development. The API is not stable and may change without notice.
 
-Using Arcane Updater is a small Docker update flow:
+> [!NOTE]
+> This module uses the experimental `encoding/json/v2` package. Build and test with `GOEXPERIMENT=jsonv2` set.
 
-1. Create an `api.Service` with `api.Config`.
-2. Use the built-in Docker client, image puller, registry digest resolver, memory pending store, and Docker Compose updater, or override them in config.
-3. Call `ApplyPending` to apply stored image update records, or `UpdateContainer` to update one container directly.
-4. The service normalizes image references, skips excluded or disabled containers, checks digests when a resolver is configured, pulls the target image, and recreates matching standalone containers.
-5. Compose containers are grouped by Compose labels, recreated through Docker Compose, then verified against the old image ID.
-6. Containers identified as self-update targets are handled by `SelfUpdater` instead of the standalone recreate path.
-7. Results are returned as `types.Result`, and optional recorders receive run, event, and notification payloads.
-
-The updater does not own scheduling, durable persistence, user notifications, or application self-upgrade behavior. Those can be added by providing adapters.
-
-## Getting started
+## Install
 
 ```sh
 go get go.getarcane.app/updater@latest
 ```
 
-```go
-svc := api.NewDefaultService()
+## Quick start
 
-result, err := svc.UpdateContainer(ctx, "container-id", types.Options{})
+Everything runs through a `Service`. The zero `Config` is valid:
+
+```go
+import "go.getarcane.app/updater"
+
+service, err := updater.New(updater.Config{})
+if err != nil {
+	return err
+}
+defer service.Close()
+
+result, err := service.UpdateContainer(ctx, containerID, updater.Options{})
 ```
 
-For pending image records:
+To work through recorded pending updates instead of one named container:
 
 ```go
-store := api.NewMemoryPendingStore(types.ImageUpdateRecord{
+store := updater.NewMemoryPendingStore(updater.ImageUpdateRecord{
 	ID:         "sha256:old-image-id",
 	Repository: "nginx",
 	Tag:        "1.27",
 	HasUpdate:  true,
-	UpdateType: types.UpdateTypeDigest,
+	UpdateType: updater.UpdateTypeDigest,
 })
 
-svc := api.NewService(api.Config{PendingStore: store})
+service, err := updater.New(updater.Config{PendingStore: store})
+if err != nil {
+	return err
+}
+defer service.Close()
 
-result, err := svc.ApplyPending(ctx, types.Options{})
+result, err := service.ApplyPending(ctx, updater.Options{})
 ```
+
+`ApplyPending` applies each pending update and then restarts the containers still running the images it replaced. `Options{DryRun: true}` reports what would change without touching anything.
+
+## Configuring
+
+Every `Config` field is a seam. Leave one nil and the updater supplies a Docker-backed default — or, for the purely optional ones, skips that behavior entirely. Override only what you own:
+
+```go
+service, err := updater.New(updater.Config{
+	// Replace a default.
+	DockerClientProvider: updater.NewDockerClientProvider(client.WithHost("tcp://docker-proxy:2375")),
+	PendingStore:         myStore,
+
+	// Add optional behavior.
+	Notifier:      myNotifier,   // told about each successful update
+	EventRecorder: myEvents,     // receives lifecycle events
+	SelfUpdater:   myUpgrader,   // handles the container we run in
+
+	// Restrict which containers are in scope.
+	LabelPolicy: updater.LabelPolicy{
+		IsUpdateDisabledFunc: func(l map[string]string) bool { return l["updates"] == "off" },
+	},
+
+	OperationTimeout: 30 * time.Second,
+})
+```
+
+`LabelPolicy` merges per field: overriding `IsUpdateDisabledFunc` above keeps the default behavior for self-update, agent, server, swarm, and stop-signal detection. See `DefaultLabelPolicy`.
+
+`Service.Close` shuts down the Docker client `New` created. If you supplied your own `DockerClientProvider`, its lifecycle stays yours and `Close` is a no-op.
+
+## How it works
+
+1. Resolve a pullable image reference for each in-scope container, skipping image IDs and digest-pinned references — re-pulling those can never yield a newer image.
+2. Skip containers the `LabelPolicy` disables, containers the host excludes via `SettingsProvider`, and Swarm tasks.
+3. Check the registry digest, so an image that has not actually changed is not needlessly recreated (`Options{Force: true}` bypasses this).
+4. Pull the target image.
+5. Recreate the container — through the `ProjectUpdater` for Compose services (grouped by project, then verified to no longer run the old image), or by a direct stop/create/start with rollback for standalone containers.
+6. Restart containers that depend on what just changed, in dependency order.
+7. Hand self-update targets to the `SelfUpdater`, last, since updating them may stop the calling process.
+
+Scheduling, durable persistence, and user-facing notifications are not the module's job; supply adapters for those.
 
 ## Package layout
 
-- `api`: public updater service and adapter interfaces.
-- `types`: stable public DTOs for options, results, status, records, labels, events, and notifications.
-- `pkg/refs`: image reference normalization.
-- `pkg/digest`: digest parsing and local/remote digest comparison.
-- `pkg/match`: image and container matching helpers.
-- `pkg/labels`: default updater, Compose, self-update, and swarm label behavior.
-- `pkg/registry`: registry HTTP digest and rate-limit helpers.
-- `pkg/deps`: container dependency sorting.
-- `pkg/utils`: shared Docker, Compose label, registry, and compatibility utilities.
-- `pkg/logs`: message-only log file setup helpers.
+| Package | Contents |
+| --- | --- |
+| `updater` | The `Service`, `Config`, the port interfaces, and the result types. Everything a host application normally needs. |
+| `updater/refs` | Image reference normalization and pullability checks. |
+| `updater/digest` | OCI digest parsing and canonicalization. |
+| `updater/labels` | The Arcane container labels and the predicates that read them. |
+| `updater/registry` | Registry HTTP digest and pull-rate-limit lookups. |
+
+Implementation details live under `internal/` and are not part of the public API.
+
+## Migrating from v0.6.x
+
+v0.7.0 collapses `api` and `types` into the module root, so one import replaces two.
+
+| Before | After |
+| --- | --- |
+| `api.NewService(cfg)` | `updater.New(cfg)`, which now returns `(*Service, error)` |
+| `api.NewDefaultService()` | `updater.New(updater.Config{})` |
+| `api.Service`, `api.Config`, the port interfaces | same names in `updater` |
+| `types.Options`, `types.Result`, `types.Status`, … | same names in `updater` |
+| `api.ResolvePullableImageRef` | `refs.PullableImageRef`, without the second return |
+| `api.UpdateStandaloneContainer` | unexported; use `UpdateContainer` |
+| `pkg/digest.RemoteResolver` (`GetImageDigest`) | `updater.RegistryDigestResolver` (`ImageDigest`) |
+| `pkg/labels.DefaultLabelPolicy` | `updater.DefaultLabelPolicy` |
+| `pkg/labels.GetStopSignal` | `labels.StopSignal` |
+| `pkg/registry.NewRegistryHTTPClient` | `registry.NewHTTPClient` |
+| `pkg/{refs,digest,labels,registry}` | `{refs,digest,labels,registry}` — drop the `pkg/` |
+| `pkg/{match,deps,utils}`, digest `Checker`/`RefIDCache` | moved to `internal/`; no longer public |
+| `pkg/logs` | removed |
+| `types.HistoryRecord`, `types.ContextHook` | removed; nothing consumed them |
+
+Reshaped data types:
+
+- `Result.StartTime`/`EndTime` are now `time.Time`; the pre-formatted `Duration` string is now the `Duration()` method. `ActivityID` is gone.
+- `ResourceResult.OldImages`/`NewImages` maps are now the `OldImage`/`NewImage` strings they always held.
+- `Options.Type` and `Options.ResourceIDs` are gone; nothing read them.
+- `ResourceType`, `ResourceStatus`, and `UpdateType` are now named string types. The constant *values* are unchanged, so persisted data stays valid.
+
+`New` also fixes a trap: `LabelPolicy` now merges per field, so overriding one func no longer silently drops the defaults for the others.
 
 ## Development
 
 ```sh
 just format all
-go test ./...
-just lint all
+just test
+just lint
 ```
 
 ## License
