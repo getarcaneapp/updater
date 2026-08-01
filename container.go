@@ -251,13 +251,22 @@ func (s *Service) createAndStartStandaloneContainer(ctx context.Context, dockerC
 	}
 	cfg = cloneContainerConfig(cfg)
 	cfg.Image = newRef
-	if cfg.Labels != nil {
-		if _, ok := cfg.Labels["com.docker.compose.image"]; ok {
-			if imgInspect, inspectErr := dockerClient.ImageInspect(ctx, newRef); inspectErr == nil {
-				cfg.Labels["com.docker.compose.image"] = imgInspect.ID
-			}
+
+	imageLabels := map[string]string(nil)
+	imageID := ""
+	imageInspect, imageInspectErr := dockerClient.ImageInspect(ctx, newRef)
+	if imageInspectErr != nil {
+		s.logger.WarnContext(ctx, "could not inspect target image labels; preserving container OCI overrides",
+			"image", newRef,
+			"error", imageInspectErr,
+		)
+	} else {
+		imageID = imageInspect.ID
+		if imageInspect.Config != nil {
+			imageLabels = imageInspect.Config.Labels
 		}
 	}
+	cfg.Labels = refreshRecreatedImageLabelsInternal(cfg.Labels, imageLabels, imageID)
 
 	hostConfig, err := compat.PrepareRecreateHostConfig(ctx, dockerClient, inspect.HostConfig)
 	if err != nil {
@@ -451,4 +460,40 @@ func cloneContainerConfig(config *container.Config) *container.Config {
 	copied.Entrypoint = slices.Clone(config.Entrypoint)
 	copied.Labels = maps.Clone(config.Labels)
 	return copied
+}
+
+func refreshRecreatedImageLabelsInternal(containerLabels, imageLabels map[string]string, imageID string) map[string]string {
+	refreshed := maps.Clone(containerLabels)
+
+	// Docker does not expose whether an effective container label was inherited
+	// or explicitly set, so existing values must win.
+	for key, value := range imageLabels {
+		if !strings.HasPrefix(strings.ToLower(key), "org.opencontainers.image.") {
+			continue
+		}
+		preserved := false
+		for existingKey := range refreshed {
+			if strings.EqualFold(existingKey, key) {
+				preserved = true
+				break
+			}
+		}
+		if preserved {
+			continue
+		}
+		if refreshed == nil {
+			refreshed = make(map[string]string)
+		}
+		refreshed[key] = value
+	}
+
+	if refreshed != nil && imageID != "" {
+		for key := range refreshed {
+			if strings.EqualFold(key, "com.docker.compose.image") {
+				refreshed[key] = imageID
+			}
+		}
+	}
+
+	return refreshed
 }

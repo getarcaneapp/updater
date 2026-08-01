@@ -63,13 +63,57 @@ func TestClearPendingRecord(t *testing.T) {
 	}
 }
 
+func TestRefreshRecreatedImageLabelsInternalPreservesEqualValueOverride(t *testing.T) {
+	containerLabels := map[string]string{
+		"org.opencontainers.image.version": "v2.6.0-next.30",
+	}
+	targetImageLabels := map[string]string{
+		"org.opencontainers.image.version": "v2.7.0-next.17",
+		"org.opencontainers.image.title":   "Arcane",
+	}
+
+	got := refreshRecreatedImageLabelsInternal(containerLabels, targetImageLabels, "")
+
+	if got["org.opencontainers.image.version"] != "v2.6.0-next.30" {
+		t.Fatalf("OCI version = %q, want equal-value container override", got["org.opencontainers.image.version"])
+	}
+	if got["org.opencontainers.image.title"] != "Arcane" {
+		t.Fatalf("OCI title = %q, want target image value for missing label", got["org.opencontainers.image.title"])
+	}
+}
+
 func TestUpdateStandaloneContainerRollsBackAndRemovesDanglingCreateOnStartFailure(t *testing.T) {
 	var operations []string
 	var createdImages []string
+	var createdLabels []map[string]string
 	recorder := &fakeEventRecorder{}
 	dockerClient := newDockerClientForHandler(t, func(w http.ResponseWriter, r *http.Request) {
 		path := dockerAPIPath(r.URL.Path)
 		switch {
+		case r.Method == http.MethodGet && path == "/images/app:2/json":
+			writeDockerJSON(t, w, map[string]any{
+				"Id": "sha256:new-image",
+				"Config": map[string]any{
+					"Labels": map[string]string{
+						"org.opencontainers.image.version":  "v2.7.0-next.17",
+						"org.opencontainers.image.revision": "new-revision",
+						"org.opencontainers.image.source":   "https://image.example/new",
+						"org.opencontainers.image.title":    "new-title",
+					},
+				},
+			})
+		case r.Method == http.MethodGet && path == "/images/sha256:old-image/json":
+			writeDockerJSON(t, w, map[string]any{
+				"Id": "sha256:old-image",
+				"Config": map[string]any{
+					"Labels": map[string]string{
+						"org.opencontainers.image.version":  "v2.6.0-next.30",
+						"org.opencontainers.image.revision": "old-revision",
+						"org.opencontainers.image.source":   "https://image.example/old",
+						"org.opencontainers.image.title":    "old-title",
+					},
+				},
+			})
 		case r.Method == http.MethodPost && path == "/containers/old-id/stop":
 			operations = append(operations, "stop:old-id")
 			w.WriteHeader(http.StatusOK)
@@ -85,6 +129,7 @@ func TestUpdateStandaloneContainerRollsBackAndRemovesDanglingCreateOnStartFailur
 				t.Fatalf("decode create body: %v", err)
 			}
 			createdImages = append(createdImages, body.Image)
+			createdLabels = append(createdLabels, body.Labels)
 			if len(createdImages) == 1 {
 				operations = append(operations, "create:new")
 				writeDockerJSON(t, w, map[string]any{"Id": "new-id", "Warnings": []string{}})
@@ -109,7 +154,17 @@ func TestUpdateStandaloneContainerRollsBackAndRemovesDanglingCreateOnStartFailur
 
 	err := service.updateStandaloneContainer(context.Background(),
 		container.Summary{ID: "old-id", Names: []string{"/app"}},
-		container.InspectResponse{ID: "old-id", Name: "/app", Image: "sha256:old-image", Config: &container.Config{Image: "app:1"}},
+		container.InspectResponse{ID: "old-id", Name: "/app", Image: "sha256:old-image", Config: &container.Config{
+			Image: "app:1",
+			Labels: map[string]string{
+				"org.opencontainers.image.version":  "v2.6.0-next.30",
+				"org.opencontainers.image.revision": "old-revision",
+				"org.opencontainers.image.source":   "https://container.example/override",
+				"com.docker.compose.image":          "sha256:old-image",
+				"com.docker.compose.project":        "arcane",
+				"com.example.custom":                "keep",
+			},
+		}},
 		"app:2",
 	)
 
@@ -121,6 +176,39 @@ func TestUpdateStandaloneContainerRollsBackAndRemovesDanglingCreateOnStartFailur
 	}
 	if len(createdImages) != 2 || createdImages[0] != "app:2" || createdImages[1] != "sha256:old-image" {
 		t.Fatalf("created images = %#v, want new ref then old image ID", createdImages)
+	}
+	if got := createdLabels[0]["org.opencontainers.image.version"]; got != "v2.6.0-next.30" {
+		t.Fatalf("new container OCI version = %q, want equal-value container override", got)
+	}
+	if got := createdLabels[0]["org.opencontainers.image.revision"]; got != "old-revision" {
+		t.Fatalf("new container OCI revision = %q, want equal-value container override", got)
+	}
+	if got := createdLabels[0]["org.opencontainers.image.source"]; got != "https://container.example/override" {
+		t.Fatalf("new container OCI source = %q, want container override", got)
+	}
+	if got := createdLabels[0]["org.opencontainers.image.title"]; got != "new-title" {
+		t.Fatalf("new container OCI title = %q, want target image value for missing label", got)
+	}
+	if got := createdLabels[0]["com.docker.compose.image"]; got != "sha256:new-image" {
+		t.Fatalf("new container Compose image = %q, want sha256:new-image", got)
+	}
+	if got := createdLabels[0]["com.docker.compose.project"]; got != "arcane" {
+		t.Fatalf("new container Compose project = %q, want arcane", got)
+	}
+	if got := createdLabels[0]["com.example.custom"]; got != "keep" {
+		t.Fatalf("new container custom label = %q, want keep", got)
+	}
+	if got := createdLabels[1]["org.opencontainers.image.version"]; got != "v2.6.0-next.30" {
+		t.Fatalf("rollback container OCI version = %q, want v2.6.0-next.30", got)
+	}
+	if got := createdLabels[1]["org.opencontainers.image.source"]; got != "https://container.example/override" {
+		t.Fatalf("rollback container OCI source = %q, want container override", got)
+	}
+	if got := createdLabels[1]["org.opencontainers.image.title"]; got != "old-title" {
+		t.Fatalf("rollback container OCI title = %q, want previous image value for missing label", got)
+	}
+	if got := createdLabels[1]["com.docker.compose.image"]; got != "sha256:old-image" {
+		t.Fatalf("rollback container Compose image = %q, want sha256:old-image", got)
 	}
 	assertOperationsInOrder(t, operations, []string{
 		"stop:old-id",
