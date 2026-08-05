@@ -12,6 +12,7 @@ import (
 	"go.getarcane.app/updater/internal/deps"
 	"go.getarcane.app/updater/internal/digestcheck"
 	"go.getarcane.app/updater/internal/match"
+	updaterlabels "go.getarcane.app/updater/labels"
 	"go.getarcane.app/updater/refs"
 )
 
@@ -75,7 +76,7 @@ func (s *Service) scanRestartCandidates(ctx context.Context, dockerClient *clien
 	targetImageIDs := digestcheck.NewRefIDCache(digestcheck.NewChecker(dockerClient, nil))
 
 	for _, summary := range in.containers {
-		if shouldSkipSummary(summary, in.excludedContainers, in.dockerProxyName, s.config.LabelPolicy) {
+		if shouldSkipSummary(summary, in.excludedContainers, in.dockerProxyName, s.config.LabelPolicy, s.config.SwarmServiceUpdater != nil) {
 			continue
 		}
 		if summary.Labels == nil {
@@ -184,25 +185,29 @@ func (s *Service) sortRestartCandidates(ctx context.Context, scan *restartScan) 
 
 // restartRun accumulates the results and deferred work of a restart pass.
 type restartRun struct {
-	composeGroups        map[string]composeGroup
-	processedProjects    map[string]bool
-	projectResults       map[string]error
-	standaloneCandidates []deps.ContainerWithDeps
-	standaloneIndexes    map[string]int
-	selfUpdateCandidates []selfUpdatePlan
-	selfUpdateIndexes    map[string]int
-	results              []ResourceResult
+	composeGroups          map[string]composeGroup
+	processedProjects      map[string]bool
+	projectResults         map[string]error
+	processedSwarmServices map[string]bool
+	swarmServiceResults    map[string]error
+	standaloneCandidates   []deps.ContainerWithDeps
+	standaloneIndexes      map[string]int
+	selfUpdateCandidates   []selfUpdatePlan
+	selfUpdateIndexes      map[string]int
+	results                []ResourceResult
 }
 
 // executeRestartPlans routes each sorted candidate to the compose,
 // self-update, or standalone path and returns the merged results.
 func (s *Service) executeRestartPlans(ctx context.Context, dockerClient *client.Client, sorted []deps.ContainerWithDeps, plansByName map[string]*restartPlan) ([]ResourceResult, error) {
 	run := &restartRun{
-		composeGroups:     s.buildComposeGroups(ctx, sorted, plansByName),
-		processedProjects: map[string]bool{},
-		projectResults:    map[string]error{},
-		standaloneIndexes: map[string]int{},
-		selfUpdateIndexes: map[string]int{},
+		composeGroups:          s.buildComposeGroups(ctx, sorted, plansByName),
+		processedProjects:      map[string]bool{},
+		projectResults:         map[string]error{},
+		processedSwarmServices: map[string]bool{},
+		swarmServiceResults:    map[string]error{},
+		standaloneIndexes:      map[string]int{},
+		selfUpdateIndexes:      map[string]int{},
 	}
 
 	for _, candidate := range sorted {
@@ -257,8 +262,11 @@ func (s *Service) dispatchRestartCandidate(ctx context.Context, dockerClient *cl
 	serviceName := compose.ServiceLabel(labels)
 	projectID := composeProjectID(projectName, run.composeGroups)
 	selfUpdate := s.isSelfUpdateCandidate(plan.cnt.ID, labels)
+	swarmTask := s.config.SwarmServiceUpdater != nil && s.config.LabelPolicy.IsSwarmTask(labels)
 
 	switch {
+	case swarmTask && !selfUpdate:
+		res = s.applySwarmServiceUpdate(ctx, res, plan, candidate.Name, labels, run)
 	case projectID != "" && serviceName != "" && !selfUpdate:
 		res = s.applyComposeServiceUpdate(ctx, dockerClient, res, plan, candidate.Name, projectID, projectName, serviceName, run)
 	case selfUpdate:
@@ -419,6 +427,46 @@ func (s *Service) applyComposeServiceUpdate(
 
 	if projectErr != nil {
 		s.logger.WarnContext(ctx, "service updated despite project-level compose error", "projectID", projectID, "projectName", projectName, "serviceName", serviceName, "error", projectErr)
+	}
+	res.Status = StatusUpdated
+	res.UpdateAvailable = true
+	res.UpdateApplied = true
+	_ = s.notify(ctx, plan.cnt.ID, containerName, plan.newRef, plan.match, refs.NormalizeImageUpdateRef(plan.newRef))
+	return res
+}
+
+// applySwarmServiceUpdate updates the task's owning Swarm service through the
+// configured SwarmServiceUpdater, once per service per run; every task replica
+// of a service shares that one outcome.
+func (s *Service) applySwarmServiceUpdate(
+	ctx context.Context,
+	res ResourceResult,
+	plan *restartPlan,
+	containerName string,
+	containerLabels map[string]string,
+	run *restartRun,
+) ResourceResult {
+	serviceID := updaterlabels.SwarmServiceID(containerLabels)
+	serviceName := updaterlabels.SwarmServiceName(containerLabels)
+	key := serviceID
+	if key == "" {
+		key = serviceName
+	}
+	res.Details = map[string]any{"swarmServiceId": serviceID, "swarmServiceName": serviceName}
+
+	if !run.processedSwarmServices[key] {
+		run.processedSwarmServices[key] = true
+		opCtx, cancel := s.opCtx(ctx)
+		if err := s.config.SwarmServiceUpdater.UpdateServiceImage(opCtx, serviceID, serviceName, refs.NormalizeImageUpdateRef(plan.newRef)); err != nil {
+			run.swarmServiceResults[key] = err
+		}
+		cancel()
+	}
+
+	if err := run.swarmServiceResults[key]; err != nil {
+		res.Status = StatusFailed
+		res.Error = fmt.Sprintf("swarm service update failed: %v", err)
+		return res
 	}
 	res.Status = StatusUpdated
 	res.UpdateAvailable = true

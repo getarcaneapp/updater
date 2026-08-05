@@ -182,6 +182,21 @@ func (f *fakeProjectUpdater) UpdateServices(ctx context.Context, projectID strin
 	return f.err
 }
 
+type fakeSwarmServiceUpdater struct {
+	updateCalls []string
+	err         error
+}
+
+func (f *fakeSwarmServiceUpdater) UpdateServiceImage(ctx context.Context, serviceID, serviceName, imageRef string) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
+	f.updateCalls = append(f.updateCalls, serviceID+"/"+serviceName+":"+imageRef)
+	return f.err
+}
+
 type fakeSelfUpdater struct {
 	targets []SelfUpdateTarget
 }

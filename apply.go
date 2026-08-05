@@ -294,7 +294,7 @@ func (s *Service) usedImages(ctx context.Context) (map[string]struct{}, error) {
 		return nil, err
 	}
 	for _, summary := range listResult.Items {
-		if shouldSkipSummary(summary, excludedContainers, "", s.config.LabelPolicy) {
+		if shouldSkipSummary(summary, excludedContainers, "", s.config.LabelPolicy, s.config.SwarmServiceUpdater != nil) {
 			continue
 		}
 		if imageRef := refs.NormalizeImageUpdateRef(summary.Image); imageRef != "" {

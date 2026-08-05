@@ -11,7 +11,7 @@ import (
 	"go.getarcane.app/updater/internal/deps"
 )
 
-func shouldSkipSummary(summary container.Summary, excludedContainers map[string]bool, dockerProxyName string, policy LabelPolicy) bool {
+func shouldSkipSummary(summary container.Summary, excludedContainers map[string]bool, dockerProxyName string, policy LabelPolicy, swarmEnabled bool) bool {
 	for _, name := range summary.Names {
 		cleanName := strings.TrimPrefix(name, "/")
 		if excludedContainers[cleanName] || cleanName == dockerProxyName {
@@ -20,6 +20,9 @@ func shouldSkipSummary(summary container.Summary, excludedContainers map[string]
 	}
 	if policy.IsUpdateDisabled(summary.Labels) {
 		return true
+	}
+	if swarmEnabled {
+		return false
 	}
 	return policy.IsSwarmTask(summary.Labels) && !policy.IsSelfUpdateTarget(summary.Labels)
 }

@@ -29,6 +29,12 @@ type Config struct {
 	// is filled in from DefaultLabelPolicy.
 	LabelPolicy LabelPolicy
 
+	// SwarmServiceUpdater is optional. When nil, Swarm task containers are
+	// skipped ("update at the service level"); when set, the updater applies
+	// image updates by mutating each task's owning Swarm service through it,
+	// once per service no matter how many task replicas are involved.
+	SwarmServiceUpdater SwarmServiceUpdater
+
 	// RunRecorder is optional; when nil, per-resource results are not recorded.
 	RunRecorder RunRecorder
 	// Settings is optional; when nil, no containers are excluded.

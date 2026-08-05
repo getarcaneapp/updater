@@ -72,6 +72,18 @@ func IsSwarmTask(labels map[string]string) bool {
 	return hasNonEmptyLabel(labels, LabelSwarmServiceID) || hasNonEmptyLabel(labels, LabelSwarmServiceName)
 }
 
+// SwarmServiceID returns the owning Swarm service ID from a task's labels.
+func SwarmServiceID(labels map[string]string) string {
+	value, _ := lookupLabel(labels, LabelSwarmServiceID)
+	return strings.TrimSpace(value)
+}
+
+// SwarmServiceName returns the owning Swarm service name from a task's labels.
+func SwarmServiceName(labels map[string]string) string {
+	value, _ := lookupLabel(labels, LabelSwarmServiceName)
+	return strings.TrimSpace(value)
+}
+
 // StopSignal returns a custom stop signal from labels.
 func StopSignal(labels map[string]string) string {
 	value, ok := lookupLabel(labels, LabelStopSignal)
