@@ -48,6 +48,13 @@ type ProjectUpdater interface {
 	UpdateServices(ctx context.Context, projectID string, services []string) error
 }
 
+// SwarmServiceUpdater updates Docker Swarm services owned by a host
+// application. serviceID and serviceName come from the task container's
+// com.docker.swarm.service.* labels; either may be empty, never both.
+type SwarmServiceUpdater interface {
+	UpdateServiceImage(ctx context.Context, serviceID, serviceName, imageRef string) error
+}
+
 // SelfUpdater handles host-specific self-update targets: containers the updater
 // must not recreate itself, typically because the host application runs in one.
 type SelfUpdater interface {

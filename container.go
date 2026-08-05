@@ -15,6 +15,7 @@ import (
 	"go.getarcane.app/updater/internal/compat"
 	"go.getarcane.app/updater/internal/compose"
 	"go.getarcane.app/updater/internal/digestcheck"
+	updaterlabels "go.getarcane.app/updater/labels"
 	"go.getarcane.app/updater/refs"
 )
 
@@ -62,7 +63,7 @@ func (s *Service) UpdateContainer(ctx context.Context, containerID string, opts 
 		out.Skipped++
 		return out, nil
 	}
-	if s.config.LabelPolicy.IsSwarmTask(labels) && !s.isSelfUpdateCandidate(target.ID, labels) {
+	if s.config.LabelPolicy.IsSwarmTask(labels) && !s.isSelfUpdateCandidate(target.ID, labels) && s.config.SwarmServiceUpdater == nil {
 		item := skippedContainerResult(target.ID, name, "swarm service; update at the service level")
 		out.Items = append(out.Items, item)
 		out.Checked = 1
@@ -134,6 +135,27 @@ func (s *Service) UpdateContainer(ctx context.Context, containerID string, opts 
 		return out, nil
 	}
 
+	if s.config.LabelPolicy.IsSwarmTask(labels) && !s.isSelfUpdateCandidate(target.ID, labels) {
+		serviceID := updaterlabels.SwarmServiceID(labels)
+		serviceName := updaterlabels.SwarmServiceName(labels)
+		details := map[string]any{"swarmServiceId": serviceID, "swarmServiceName": serviceName}
+		if err := s.config.SwarmServiceUpdater.UpdateServiceImage(ctx, serviceID, serviceName, normalizedRef); err != nil {
+			item := failedContainerResult(target.ID, name, fmt.Sprintf("swarm service update failed: %v", err))
+			item.Details = details
+			out.Items = append(out.Items, item)
+			out.Failed++
+		} else {
+			item := updatedContainerResult(target.ID, name, inspect.Image, normalizedRef)
+			item.Details = details
+			out.Items = append(out.Items, item)
+			out.Updated++
+			_ = s.notify(ctx, target.ID, name, imageRef, inspect.Image, normalizedRef)
+			s.clearPendingRecord(ctx, normalizedRef)
+		}
+		out.Checked = 1
+		return out, nil
+	}
+
 	if err := s.updateComposeOrStandalone(ctx, target, inspect, normalizedRef); err != nil {
 		item := failedContainerResult(target.ID, name, err.Error())
 		out.Items = append(out.Items, item)
@@ -147,6 +169,70 @@ func (s *Service) UpdateContainer(ctx context.Context, containerID string, opts 
 	}
 	out.Checked = 1
 	return out, nil
+}
+
+// UpdateContainers updates each container in containerIDs and folds the
+// per-container results into one Result. Swarm task containers that share an
+// owning service produce a single service update: the first task runs the full
+// update flow and the remaining replicas are reported as skipped.
+func (s *Service) UpdateContainers(ctx context.Context, containerIDs []string, opts Options) (out *Result, err error) {
+	out, finish := newTimedResult()
+	defer finish(&err)
+
+	processedServices := map[string]bool{}
+	for _, containerID := range containerIDs {
+		if key, name := s.swarmServiceKeyForContainer(ctx, containerID); key != "" {
+			if processedServices[key] {
+				item := skippedContainerResult(containerID, name, "swarm service already handled in this run")
+				out.Items = append(out.Items, item)
+				out.Checked++
+				out.Skipped++
+				continue
+			}
+			processedServices[key] = true
+		}
+		res, resErr := s.UpdateContainer(ctx, containerID, opts)
+		if resErr != nil {
+			out.Items = append(out.Items, failedContainerResult(containerID, "", resErr.Error()))
+			out.Failed++
+			continue
+		}
+		out.Checked += res.Checked
+		out.Updated += res.Updated
+		out.Restarted += res.Restarted
+		out.Skipped += res.Skipped
+		out.Failed += res.Failed
+		out.Items = append(out.Items, res.Items...)
+	}
+	return out, nil
+}
+
+// swarmServiceKeyForContainer resolves the owning Swarm service key used to
+// deduplicate replicas in UpdateContainers. It returns "" when the container is
+// not a swarm task the configured SwarmServiceUpdater would handle; lookup
+// errors are left for UpdateContainer to surface.
+func (s *Service) swarmServiceKeyForContainer(ctx context.Context, containerID string) (string, string) {
+	if s.config.SwarmServiceUpdater == nil {
+		return "", ""
+	}
+	dockerClient, err := s.dockerClient(ctx)
+	if err != nil {
+		return "", ""
+	}
+	inspectResult, err := compat.ContainerInspect(ctx, dockerClient, strings.TrimSpace(containerID), client.ContainerInspectOptions{})
+	if err != nil {
+		return "", ""
+	}
+	inspect := inspectResult.Container
+	containerLabels := labelsFromInspect(inspect)
+	if !s.config.LabelPolicy.IsSwarmTask(containerLabels) || s.isSelfUpdateCandidate(inspect.ID, containerLabels) {
+		return "", ""
+	}
+	key := updaterlabels.SwarmServiceID(containerLabels)
+	if key == "" {
+		key = updaterlabels.SwarmServiceName(containerLabels)
+	}
+	return key, strings.TrimPrefix(inspect.Name, "/")
 }
 
 // clearPendingRecord clears the pending update record for an applied
